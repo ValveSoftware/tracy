@@ -88,6 +88,26 @@ Backend::Backend( const char* title, const std::function<void()>& redraw, const 
     if( !s_window ) exit( 1 );
 
     glfwSetWindowPos( s_window, m_winPos.x, m_winPos.y );
+
+#  if GLFW_VERSION_MAJOR > 3 || ( GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 3 )
+    // Now that our window is fully created and setup, we will know/get the correct DPI for the correct monitor.
+    // apply our dpi scale to m_winPos (we need to do this since in the size and pos callbacks we will get DPI
+    // scaled values, otherwise they'll be out of sync, and reposition/size the window before finally showing it.
+    // We must do this *after* calling glfwSetWindowPos() once, otherwise windows will just give us the DPI of
+    // the primary monitor, not the DPI of the monitor the window will actually be on.
+    float dpiScale = GetDpiScale();
+    if ( dpiScale > 0.0f )
+    {
+        m_winPos.x *= dpiScale;
+        m_winPos.y *= dpiScale;
+        m_winPos.w *= dpiScale;
+        m_winPos.h *= dpiScale;
+
+        glfwSetWindowPos( s_window, m_winPos.x, m_winPos.y );
+        glfwSetWindowSize( s_window, m_winPos.w, m_winPos.h );
+    }
+#  endif
+
 #if GLFW_VERSION_MAJOR > 3 || ( GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 2 )
     if( m_winPos.maximize ) glfwMaximizeWindow( s_window );
 #endif
@@ -115,6 +135,20 @@ Backend::Backend( const char* title, const std::function<void()>& redraw, const 
 
 Backend::~Backend()
 {
+#  if GLFW_VERSION_MAJOR > 3 || ( GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 3 )
+    // Make sure we store the unscaled window pos/size in window.position to prevent the
+    // window from moving/resizing when loading the values and creating the window on next startup
+    float dpiScale = GetDpiScale();
+    if ( dpiScale > 0.0f )
+    {
+        float invDpiScale = 1.0f / dpiScale;
+        m_winPos.x *= invDpiScale;
+        m_winPos.y *= invDpiScale;
+        m_winPos.w *= invDpiScale;
+        m_winPos.h *= invDpiScale;
+    }
+#  endif
+
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
 

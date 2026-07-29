@@ -265,7 +265,7 @@ public:
         }
 #endif
         assert( head > m_tail );
-
+        
         const unsigned int wrappedTail = (unsigned int)( m_tail % m_queryCount );
 
         unsigned int cnt;
@@ -549,7 +549,7 @@ public:
         if( depth > 0 && has_callstack() )
         {
             item = Profiler::QueueSerialCallstack( Callstack( depth ) );
-            MemWrite( &item->hdr.type, QueueType::GpuZoneBeginCallstackSerial );
+        MemWrite( &item->hdr.type, QueueType::GpuZoneBeginCallstackSerial );
         }
         else
         {
@@ -608,7 +608,7 @@ public:
         if( depth > 0 && has_callstack() )
         {
             item = Profiler::QueueSerialCallstack( Callstack( depth ) );
-            MemWrite( &item->hdr.type, QueueType::GpuZoneBeginAllocSrcLocCallstackSerial );
+        MemWrite( &item->hdr.type, QueueType::GpuZoneBeginAllocSrcLocCallstackSerial );
         }
         else
         {

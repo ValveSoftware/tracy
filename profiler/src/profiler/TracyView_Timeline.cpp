@@ -4,14 +4,17 @@
 #include "TracyMouse.hpp"
 #include "TracyPrint.hpp"
 #include "TracySourceView.hpp"
+#include "TracyTimelineItemCore.hpp"
 #include "TracyTimelineItemCpuData.hpp"
 #include "TracyTimelineItemGpu.hpp"
 #include "TracyTimelineItemPlot.hpp"
 #include "TracyTimelineItemThread.hpp"
 #include "TracyView.hpp"
 
+
 namespace tracy
 {
+
 
 extern double s_time;
 
@@ -35,7 +38,7 @@ void View::HandleTimelineMouse( int64_t timespan, const ImVec2& wpos, float w )
     {
         if( ImGui::GetIO().KeyCtrl && m_highlight.start != m_highlight.end )
         {
-            m_setRangePopup = RangeSlim { m_highlight.start, m_highlight.end, true };
+            m_setRangePopup = RangeSlim { m_highlight.start, m_highlight.end, true, nullptr };
         }
         m_highlight.active = false;
     }
@@ -254,10 +257,12 @@ void View::DrawTimeline()
     m_zoneHover2.Decay( nullptr );
     m_findZone.range.StartFrame();
     m_statRange.StartFrame();
+    m_flameRange.StartFrame();
     m_waitStackRange.StartFrame();
     m_memInfo.range.StartFrame();
     m_yDelta = 0;
     m_nextLockHighlight = { -1 };
+    ResetHwCounterMaxValues();
 
     if( m_vd.zvStart == m_vd.zvEnd ) return;
     assert( m_vd.zvStart < m_vd.zvEnd );
@@ -276,6 +281,17 @@ void View::DrawTimeline()
     const auto timespan = m_vd.zvEnd - m_vd.zvStart;
     auto pxns = w / double( timespan );
 
+    m_timeAtMouse = -1;
+    m_nsPerPixel = 0;
+    if ( ImGui::IsMousePosValid() && ( pxns > 0 ) )
+    {
+        const float mpx = ImGui::GetMousePos().x;
+        const float screenx = ImGui::GetCursorScreenPos().x;
+        const double nsPerPixel = 1.0 / pxns;
+        m_timeAtMouse = (int64_t)( m_vd.zvStart + ( mpx - screenx ) * nsPerPixel );
+        m_nsPerPixel = nsPerPixel;
+    }
+
     const auto winpos = ImGui::GetWindowPos();
     const auto winsize = ImGui::GetWindowSize();
     const bool drawMouseLine = ImGui::IsWindowHovered( ImGuiHoveredFlags_ChildWindows | ImGuiHoveredFlags_AllowWhenBlockedByActiveItem ) && ImGui::IsMouseHoveringRect( winpos, winpos + winsize, false );
@@ -283,6 +299,7 @@ void View::DrawTimeline()
     {
         HandleRange( m_findZone.range, timespan, ImGui::GetCursorScreenPos(), w );
         HandleRange( m_statRange, timespan, ImGui::GetCursorScreenPos(), w );
+        HandleRange( m_flameRange, timespan, ImGui::GetCursorScreenPos(), w );
         HandleRange( m_waitStackRange, timespan, ImGui::GetCursorScreenPos(), w );
         HandleRange( m_memInfo.range, timespan, ImGui::GetCursorScreenPos(), w );
         for( auto& v : m_annotations )
@@ -367,34 +384,109 @@ void View::DrawTimeline()
         static char uptr;
         m_tc.AddItem<TimelineItemCpuData>( &uptr );
     }
+
+
+    if ( m_vd.drawPlots == ViewData::EPlotViz::Top )
+    {
+        for ( const auto &v : m_worker.GetPlots() )
+        {
+            m_tc.AddItem<TimelineItemPlot>( v );
+
+            if ( ((v->type == PlotType::User) || (v->type == PlotType::SysTime)) && m_vd.plotsChanged )
+            {
+                const char* pname =   (v->type == PlotType::SysTime)
+                                    ? "__SysTime_CPU_usage__"
+                                    : ( v->name.active ? m_worker.GetString( v->name ) : nullptr );
+                if ( pname && (strcmp( pname, "???" ) != 0) )
+                {
+                    const std::string name( pname );
+                    ViewData::Plot plotSetting = { 0 };
+                    auto it = m_vd.plots.find( name );
+                    if ( it != m_vd.plots.end() )
+                    {
+                        plotSetting.visible = it->second.visible;
+                    }
+
+                    TimelineItem& ti = m_tc.GetItem( v );
+                    ti.SetVisible( plotSetting.visible );
+                }
+            }
+        }
+
+        m_vd.plotsChanged = false;
+    }
+
     if( m_vd.drawZones )
     {
         const auto& threadData = m_worker.GetThreadData();
-        if( threadData.size() != m_threadOrder.size() )
+        if(m_vd.threadsChanged || ( threadData.size() != m_threadOrder.size() ) )
         {
-            m_threadOrder.reserve( threadData.size() );
-            // Only new threads are in the end of the worker's ThreadData vector.
-            // Threads which get reordered by received thread hints are not new, yet removed from m_threadOrder.
-            // Therefore, those are kept in the m_threadReinsert vector. As such, we will gather first threads from the
-            // reinsert vector, and afterwards the remaining ones must be new (and thus found at the end of threadData).
-            size_t numReinsert = m_threadReinsert.size();
-            size_t numNew = threadData.size() - m_threadOrder.size() - numReinsert;
-            for( size_t i = 0; i < numReinsert + numNew; i++ )
+            m_vd.threadsChanged = false;
+            if ( threadData.size() != m_threadOrder.size() )
             {
-                const ThreadData *td = i < numReinsert ? m_threadReinsert[i] : threadData[m_threadOrder.size()];
-                auto it = std::find_if( m_threadOrder.begin(), m_threadOrder.end(), [td]( const auto t ) { return td->groupHint < t->groupHint; } );
-                m_threadOrder.insert( it, td );
+                m_threadOrder.reserve( threadData.size() );
+                // Only new threads are in the end of the worker's ThreadData vector.
+                // Threads which get reordered by received thread hints are not new, yet removed from m_threadOrder.
+                // Therefore, those are kept in the m_threadReinsert vector. As such, we will gather first threads from the
+                // reinsert vector, and afterwards the remaining ones must be new (and thus found at the end of threadData).
+                size_t numReinsert = m_threadReinsert.size();
+                size_t numNew = threadData.size() - m_threadOrder.size() - numReinsert;
+                for( size_t i = 0; i < numReinsert + numNew; i++ )
+                {
+                    const ThreadData *td = i < numReinsert ? m_threadReinsert[i] : threadData[m_threadOrder.size()];
+                    auto it = std::find_if( m_threadOrder.begin(), m_threadOrder.end(), [td]( const auto t ) { return td->groupHint < t->groupHint; } );
+                    m_threadOrder.insert( it, td );
+                }
+                m_threadReinsert.clear();
             }
-            m_threadReinsert.clear();
+
+            for (int i = 0; i < threadData.size(); i++)
+            {
+                auto it = m_vd.threads.find( threadData[ i ]->id );
+                if ( it == m_vd.threads.end() )
+                {
+                    threadData[ i ]->nSort = 0x100000 - i;
+                }
+                else
+                {
+                    threadData[ i ]->nSort = it->second.priority;
+                }
+            }
+
+            std::sort( m_threadOrder.begin(), m_threadOrder.end(),
+                       [] ( const ThreadData *a, const ThreadData *b )
+                       {
+                           return a->nSort < b->nSort;
+                       } );
         }
-        for( const auto& v : m_threadOrder )
+
+        if( m_showCoreView && m_worker.HasContextSwitches() )
         {
-            m_tc.AddItem<TimelineItemThread>( v );
+            const CpuData *cpuData = m_worker.GetCpuData();
+            const int cpuDataCount = m_worker.GetCpuDataCpuCount();
+            for( int i = 0; i < cpuDataCount; i++ )
+            {
+                const CpuData *pPerCpuData = &cpuData[ i ];
+                m_tc.AddItem<TimelineItemCore>( pPerCpuData );
+            }
+        }
+        else
+        {
+            for( const auto& v : m_threadOrder )
+            {
+                m_tc.AddItem<TimelineItemThread>( v );
+
+                const bool visible = m_vd.threads[ v->id ].visible;
+                TimelineItem& ti = m_tc.GetItem( v );
+                ti.SetVisible( visible );
+            }
         }
     }
-    if( m_vd.drawPlots )
+
+    if( m_vd.drawPlots == ViewData::EPlotViz::Bottom )
     {
-        for( const auto& v : m_worker.GetPlots() )
+        TimelineItemPlot *pZoneItem = nullptr;
+        for ( const auto &v : m_worker.GetPlots() )
         {
             m_tc.AddItem<TimelineItemPlot>( v );
         }
@@ -416,7 +508,7 @@ void View::DrawTimeline()
             draw->AddRectFilled( linepos + ImVec2( ( ann->range.min - m_vd.zvStart ) * pxns, 0 ), linepos + ImVec2( ( ann->range.max - m_vd.zvStart ) * pxns, lineh ), c0 );
             DrawLine( draw, linepos + ImVec2( ( ann->range.min - m_vd.zvStart ) * pxns + 0.5f, 0.5f ), linepos + ImVec2( ( ann->range.min - m_vd.zvStart ) * pxns + 0.5f, lineh + 0.5f ), ann->range.hiMin ? c2 : c1, ann->range.hiMin ? 2 : 1 );
             DrawLine( draw, linepos + ImVec2( ( ann->range.max - m_vd.zvStart ) * pxns + 0.5f, 0.5f ), linepos + ImVec2( ( ann->range.max - m_vd.zvStart ) * pxns + 0.5f, lineh + 0.5f ), ann->range.hiMax ? c2 : c1, ann->range.hiMax ? 2 : 1 );
-            if( drawMouseLine && ImGui::IsMouseHoveringRect( linepos + ImVec2( ( ann->range.min - m_vd.zvStart ) * pxns, 0 ), linepos + ImVec2( ( ann->range.max - m_vd.zvStart ) * pxns, lineh ) ) )
+            if( hover && ImGui::IsMouseHoveringRect( linepos + ImVec2( ( ann->range.min - m_vd.zvStart ) * pxns, 0 ), linepos + ImVec2( ( ann->range.max - m_vd.zvStart ) * pxns, lineh ) ) )
             {
                 ImGui::BeginTooltip();
                 if( ann->text.empty() )
@@ -495,6 +587,15 @@ void View::DrawTimeline()
         DrawLine( draw, ImVec2( dpos.x + px1, linepos.y + 0.5f ), ImVec2( dpos.x + px1, linepos.y + lineh + 0.5f ), m_statRange.hiMax ? 0x998888EE : 0x338888EE, m_statRange.hiMax ? 2 : 1 );
     }
 
+    if( m_flameRange.active && ( m_showFlameGraph || m_showRanges ) )
+    {
+        const auto px0 = ( m_flameRange.min - m_vd.zvStart ) * pxns;
+        const auto px1 = std::max( px0 + std::max( 1.0, pxns * 0.5 ), ( m_flameRange.max - m_vd.zvStart ) * pxns );
+        DrawStripedRect( draw, wpos, px0, linepos.y, px1, linepos.y + lineh, 10 * scale, 0x2288B5EE, true, false );
+        DrawLine( draw, ImVec2( dpos.x + px0, linepos.y + 0.5f ), ImVec2( dpos.x + px0, linepos.y + lineh + 0.5f ), m_flameRange.hiMin ? 0x9988B5EE : 0x3388B5EE, m_flameRange.hiMin ? 2 : 1 );
+        DrawLine( draw, ImVec2( dpos.x + px1, linepos.y + 0.5f ), ImVec2( dpos.x + px1, linepos.y + lineh + 0.5f ), m_flameRange.hiMax ? 0x9988B5EE : 0x3388B5EE, m_flameRange.hiMax ? 2 : 1 );
+    }
+
     if( m_waitStackRange.active && ( m_showWaitStacks || m_showRanges ) )
     {
         const auto px0 = ( m_waitStackRange.min - m_vd.zvStart ) * pxns;
@@ -536,6 +637,21 @@ void View::DrawTimeline()
     {
         auto& io = ImGui::GetIO();
         DrawLine( draw, ImVec2( io.MousePos.x + 0.5f, linepos.y + 0.5f ), ImVec2( io.MousePos.x + 0.5f, linepos.y + lineh + 0.5f ), 0x33FFFFFF );
+
+        if ( m_vd.drawMousePosTime && ( m_timeAtMouse >= 0 ) )
+        {
+            const float winX = ImGui::GetWindowSize().x;
+            const char *timeStr = TimeToStringExact( m_timeAtMouse );
+
+            const ImVec2 timeSize = ImGui::CalcTextSize( timeStr );
+            float posX = io.MousePos.x + 0.5f;
+            const float diffX = ( posX + timeSize.x ) - winX;
+            if ( diffX > 0 )
+            {
+                posX -= diffX;
+            }
+            draw->AddText( ImVec2( posX, linepos.y + 0.5f ), IM_COL32_WHITE, timeStr );
+        }
     }
 
     if( m_highlightZoom.active && m_highlightZoom.start != m_highlightZoom.end )
@@ -545,6 +661,20 @@ void View::DrawTimeline()
         draw->AddRectFilled( ImVec2( wpos.x + ( s - m_vd.zvStart ) * pxns, linepos.y ), ImVec2( wpos.x + ( e - m_vd.zvStart ) * pxns, linepos.y + lineh ), 0x1688DD88 );
         draw->AddRect( ImVec2( wpos.x + ( s - m_vd.zvStart ) * pxns, linepos.y ), ImVec2( wpos.x + ( e - m_vd.zvStart ) * pxns, linepos.y + lineh ), 0x2C88DD88 );
     }
+}
+
+void View::ResetHwCounterMaxValues()
+{
+    m_hwCounterMaxCount = 1;
+    m_hwCounterMaxRate = 1.0f;
+}
+
+void View::UpdateHwCounterMaxValues( uint64_t maxCount, float maxRate )
+{
+    std::lock_guard<std::mutex> lock( m_hwCounterLock );
+
+    if ( maxCount > m_hwCounterMaxCount ) { m_hwCounterMaxCount = maxCount; }
+    if ( maxRate > m_hwCounterMaxRate ) { m_hwCounterMaxRate = maxRate; }
 }
 
 }

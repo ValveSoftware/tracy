@@ -11,6 +11,8 @@
 
 // Define TRACY_ENABLE to enable profiler.
 
+#include "TracyFeatureDefines.h"
+
 #include "common/TracySystem.cpp"
 
 #ifdef TRACY_ENABLE
@@ -25,6 +27,7 @@
 #include "client/TracySysPower.cpp"
 #include "client/TracySysTime.cpp"
 #include "client/TracySysTrace.cpp"
+#include "client/TracySysTraceWin32HwCounters.cpp"
 #include "common/TracySocket.cpp"
 #include "client/tracy_rpmalloc.cpp"
 #include "client/TracyDxt1.cpp"
@@ -52,7 +55,6 @@
 
 #ifdef _MSC_VER
 #  pragma comment(lib, "ws2_32.lib")
-#  pragma comment(lib, "dbghelp.lib")
 #  pragma comment(lib, "advapi32.lib")
 #  pragma comment(lib, "user32.lib")
 #  pragma warning(pop)

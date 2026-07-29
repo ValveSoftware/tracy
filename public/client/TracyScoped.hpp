@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "../common/TracySystem.hpp"
 #include "../common/TracyAlign.hpp"
@@ -138,27 +139,27 @@ public:
         TracyQueueCommit( zoneTextFatThread );
     }
 
-    void NameFmt( const char* fmt, ... )
+	void NameFmt( const char *pFormat, ... )
     {
-        if( !m_active ) return;
+		//if ( !m_active ) return;  // check done outside !!!
 #ifdef TRACY_ON_DEMAND
-        if( GetProfiler().ConnectionId() != m_connectionId ) return;
+		if ( GetProfiler().ConnectionId() != m_connectionId ) return;
 #endif
-        va_list args;
-        va_start( args, fmt );
-        auto size = vsnprintf( nullptr, 0, fmt, args );
-        va_end( args );
-        if( size < 0 ) return;
-        assert( size < (std::numeric_limits<uint16_t>::max)() );
 
-        char* ptr = (char*)tracy_malloc( size_t( size ) + 1 );
-        va_start( args, fmt );
-        vsnprintf( ptr, size_t( size ) + 1, fmt, args );
-        va_end( args );
+		const size_t nBufSize = 256;
+		char *pBuf = ( char * ) tracy_malloc( nBufSize );
+		
+		va_list params;
+		va_start( params, pFormat );
+		int size = vsnprintf( pBuf, nBufSize, pFormat, params );
+		va_end( params );
+
+
+		assert( size < ( std::numeric_limits<uint16_t>::max )( ) );
 
         TracyQueuePrepare( QueueType::ZoneName );
-        MemWrite( &item->zoneTextFat.text, (uint64_t)ptr );
-        MemWrite( &item->zoneTextFat.size, (uint16_t)size );
+		MemWrite( &item->zoneTextFat.text, ( uint64_t ) pBuf );
+		MemWrite( &item->zoneTextFat.size, ( uint16_t ) size );
         TracyQueueCommit( zoneTextFatThread );
     }
 
@@ -192,7 +193,7 @@ private:
     const bool m_active;
 
 #ifdef TRACY_ON_DEMAND
-    uint64_t m_connectionId = 0;
+	uint32_t m_connectionId = 0;
 #endif
 };
 

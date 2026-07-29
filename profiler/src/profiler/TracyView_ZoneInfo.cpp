@@ -293,25 +293,17 @@ void View::DrawZoneInfoWindow()
     auto& ev = *m_zoneInfoWindow;
 
     const auto& srcloc = m_worker.GetSourceLocation( ev.SrcLoc() );
-
     const auto scale = GetScale();
     ImGui::SetNextWindowSize( ImVec2( 500 * scale, 600 * scale ), ImGuiCond_FirstUseEver );
+
     bool show = true;
     ImGui::Begin( "Zone info", &show, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse );
     if( !ImGui::GetCurrentWindowRead()->SkipItems )
     {
+		ImGui::SameLine();
         if( ImGui::Button( ICON_FA_MICROSCOPE " Zoom to zone" ) )
         {
             ZoomToZone( ev );
-        }
-        auto parent = GetZoneParent( ev );
-        if( parent )
-        {
-            ImGui::SameLine();
-            if( ImGui::Button( ICON_FA_ARROW_UP " Go to parent" ) )
-            {
-                ShowZoneInfo( *parent );
-            }
         }
 #ifndef TRACY_NO_STATISTICS
         if( m_worker.AreSourceLocationZonesReady() )
@@ -321,13 +313,40 @@ void View::DrawZoneInfoWindow()
             if( !slz.zones.empty() )
             {
                 ImGui::SameLine();
+				ImGui::Checkbox( "AutoStats", &m_vd.autoZoneStats );
+
+                static int16_t sOldSrcLoc = -1;
+				ImGui::SameLine();
                 if( ImGui::Button( ICON_FA_CHART_BAR " Statistics" ) )
                 {
                     m_findZone.ShowZone( sl, m_worker.GetString( srcloc.name.active ? srcloc.name : srcloc.function ) );
+					sOldSrcLoc = -1;
+				}
+				
+				if ( m_vd.autoZoneStats )
+				{
+  					if ( sOldSrcLoc != sl )
+					{
+						m_findZone.ShowZone( sl, m_worker.GetString( srcloc.name.active ? srcloc.name : srcloc.function ) );
+						sOldSrcLoc = sl;
+                    }
                 }
             }
         }
+		
 #endif
+		auto parent = GetZoneParent( ev );
+		if ( parent )
+		{
+			ImGui::SameLine();
+			if ( ImGui::Button( ICON_FA_ARROW_UP " Go to parent" ) )
+			{
+				ShowZoneInfo( *parent );
+			}
+		}
+
+		ImGui::NewLine();
+
         if( m_worker.HasZoneExtra( ev ) && m_worker.GetZoneExtra( ev ).callstack.Val() != 0 )
         {
             const auto& extra = m_worker.GetZoneExtra( ev );
@@ -358,6 +377,15 @@ void View::DrawZoneInfoWindow()
             if( ImGui::Button( ICON_FA_FILE_LINES " Source" ) )
             {
                 ViewSourceCheckKeyMod( fileName, srcloc.line, m_worker.GetString( srcloc.function ) );
+            }
+            ImGui::SameLine();
+            if (ImGui::Button( ICON_FA_FILE_CODE " MsVC" ))
+            {
+                #define M_OPEN_IN_VS "..\\..\\..\\thirdparty\\tracy\\profiler\\utils\\openinvs\\openinvs.exe "
+
+                std::string cmd;
+                cmd = cmd + M_OPEN_IN_VS + fileName + " " + std::to_string( srcloc.line );
+                system( cmd.c_str() );               
             }
             if( hilite )
             {
@@ -685,12 +713,12 @@ void View::DrawZoneInfoWindow()
                                             ImGui::TextUnformatted( RealToString( cpu0 ) );
                                             if( ImGui::IsItemHovered() )
                                             {
-                                                const auto tt = m_worker.GetThreadTopology( cpu0 );
+                                                const auto tt = m_worker.GetThreadTopology( CpuThreadId{ cpu0 } );
                                                 if( tt )
                                                 {
                                                     ImGui::BeginTooltip();
                                                     TextFocused( "Package", RealToString( tt->package ) );
-                                                    TextFocused( "Die", RealToString( tt->die ) );
+                                                    TextFocused( "Group", RealToString( tt->group ) );
                                                     TextFocused( "Core", RealToString( tt->core ) );
                                                     ImGui::EndTooltip();
                                                 }
@@ -698,14 +726,14 @@ void View::DrawZoneInfoWindow()
                                         }
                                         else
                                         {
-                                            const auto tt0 = m_worker.GetThreadTopology( cpu0 );
-                                            const auto tt1 = m_worker.GetThreadTopology( cpu1 );
+                                            const auto tt0 = m_worker.GetThreadTopology( CpuThreadId{ cpu0 } );
+                                            const auto tt1 = m_worker.GetThreadTopology( CpuThreadId{ cpu1 } );
                                             ImGui::Text( "%i ", cpu0 );
                                             if( tt0 && ImGui::IsItemHovered() )
                                             {
                                                 ImGui::BeginTooltip();
                                                 TextFocused( "Package", RealToString( tt0->package ) );
-                                                TextFocused( "Die", RealToString( tt0->die ) );
+                                                TextFocused( "Group", RealToString( tt0->group ) );
                                                 TextFocused( "Core", RealToString( tt0->core ) );
                                                 ImGui::EndTooltip();
                                             }
@@ -717,7 +745,7 @@ void View::DrawZoneInfoWindow()
                                             {
                                                 ImGui::BeginTooltip();
                                                 TextFocused( "Package", RealToString( tt1->package ) );
-                                                TextFocused( "Die", RealToString( tt1->die ) );
+                                                TextFocused( "Group", RealToString( tt1->group ) );
                                                 TextFocused( "Core", RealToString( tt1->core ) );
                                                 ImGui::EndTooltip();
                                             }
@@ -1495,6 +1523,13 @@ void View::DrawGpuInfoWindow()
             {
                 ViewSourceCheckKeyMod( fileName, srcloc.line, m_worker.GetString( srcloc.function ) );
             }
+            ImGui::SameLine();
+            if (ImGui::Button( ICON_FA_FILE_CODE " MsVC" ))
+            {
+                std::string cmd;
+                cmd = cmd + M_OPEN_IN_VS + fileName + " " + std::to_string(srcloc.line);
+                system( cmd.c_str() );
+            }
             if( hilite )
             {
                 ImGui::PopStyleColor( 3 );
@@ -1909,13 +1944,12 @@ void View::ShowZoneInfo( const GpuEvent& ev, uint64_t thread )
     }
 }
 
-void View::ZoneTooltip( const ZoneEvent& ev )
+void View::ZoneTooltipClamped( const ZoneEvent& ev, int64_t start, int64_t end )
 {
     const auto tid = GetZoneThread( ev );
     auto& srcloc = m_worker.GetSourceLocation( ev.SrcLoc() );
-    const auto end = m_worker.GetZoneEnd( ev );
-    const auto ztime = end - ev.Start();
-    const auto selftime = GetZoneSelfTime( ev );
+    const auto ztime = end - start;
+    const auto selftime = GetZoneSelfTimeClamped( ev, start, end );
 
     ImGui::BeginTooltip();
     if( m_worker.HasZoneExtra( ev ) && m_worker.GetZoneExtra( ev ).name.Active() )
@@ -1985,7 +2019,86 @@ void View::ZoneTooltip( const ZoneEvent& ev )
         ImGui::NewLine();
         TextColoredUnformatted( ImVec4( 0xCC / 255.f, 0xCC / 255.f, 0x22 / 255.f, 1.f ), m_worker.GetString( m_worker.GetZoneExtra( ev ).text ) );
     }
+
+    ImGui::Separator();
+    TextFocused( "Start time:", TimeToStringExact( start ) );
+    TextFocused( "End time:", TimeToStringExact( end ) );
     ImGui::EndTooltip();
+}
+
+void View::CpuZoneRangeTooltip( int64_t start, int64_t end, uint32_t coreIndex, uint64_t tid )
+{
+    const char *program = "";
+    bool local = false;
+    bool untracked = true;
+    const char* label = GetThreadContextData( tid, local, untracked, program );
+    if ( !local && ( tid == 0 ) )
+    {
+        program = "System Idle Process";
+        label = "Idle";
+    }
+
+    auto tt = m_worker.GetThreadTopology( CpuThreadId{ coreIndex } );
+    ImGui::BeginTooltip();
+    TextFocused( "CPU:", RealToString( coreIndex ) );
+    if( tt )
+    {
+        ImGui::SameLine();
+        ImGui::Spacing();
+        ImGui::SameLine();
+        TextFocused( "Package:", RealToString( tt->package.val ) );
+        ImGui::SameLine();
+        TextFocused( "Core:", RealToString( tt->core.val ) );
+    }
+    if( local )
+    {
+        TextFocused( "Program:", m_worker.GetCaptureProgram().c_str() );
+        ImGui::SameLine();
+        TextDisabledUnformatted( "(profiled program)" );
+        SmallColorBox( GetThreadColor( tid, 0 ) );
+        ImGui::SameLine();
+        TextFocused( "Thread:", m_worker.GetThreadName( tid ) );
+        ImGui::SameLine();
+        ImGui::TextDisabled( "(%s)", RealToString( tid ) );
+        m_drawThreadMigrations = tid;
+        m_cpuDataThread = tid;
+    }
+    else
+    {
+        if( untracked )
+        {
+            TextFocused( "Program:", m_worker.GetCaptureProgram().c_str() );
+        }
+        else
+        {
+            TextFocused( "Program:", program );
+        }
+        ImGui::SameLine();
+        if( untracked )
+        {
+            TextDisabledUnformatted( "(untracked thread in profiled program)" );
+        }
+        else
+        {
+            TextDisabledUnformatted( "(external)" );
+        }
+        TextFocused( "Thread:", ( tid != 0 ) ? m_worker.GetExternalName( tid ).second : label );
+        ImGui::SameLine();
+        ImGui::TextDisabled( "(%s)", RealToString( tid ) );
+    }
+    ImGui::Separator();
+    TextFocused( "Start time:", TimeToStringExact( start ) );
+    TextFocused( "End time:", TimeToStringExact( end ) );
+    TextFocused( "Activity time:", TimeToStringExact( end - start ) );
+
+    ImGui::EndTooltip();
+}
+
+void View::ZoneTooltip( const ZoneEvent &ev )
+{
+    const int64_t start = ev.Start();
+    const int64_t end = m_worker.GetZoneEnd( ev );
+    ZoneTooltipClamped( ev, start, end );
 }
 
 void View::ZoneTooltip( const GpuEvent& ev )

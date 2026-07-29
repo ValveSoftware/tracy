@@ -5,7 +5,11 @@
 #include <atomic>
 #include <algorithm>
 #include <condition_variable>
+
+#if !defined( TRACY_NO_EXCEPTIONS )
 #include <stdexcept>
+#endif // if !defined( TRACY_NO_EXCEPTIONS )
+
 #include <stdio.h>
 #include <string.h>
 #include <string>
@@ -32,8 +36,10 @@
 namespace tracy
 {
 
+#if !defined( TRACY_NO_EXCEPTIONS )
 struct NotTracyDump : public std::exception {};
 struct FileReadError : public std::exception {};
+#endif // if !defined( TRACY_NO_EXCEPTIONS )
 
 class ReadStream
 {
@@ -423,7 +429,11 @@ private:
         if( fread( hdr, 1, sizeof( hdr ), f ) != sizeof( hdr ) )
         {
             fclose( f );
+#if defined( TRACY_NO_EXCEPTIONS )
+            return;
+#else // if !defined( TRACY_NO_EXCEPTIONS )
             throw NotTracyDump();
+#endif //if defined( TRACY_NO_EXCEPTIONS )
         }
 
         uint8_t streams = 1;
@@ -435,12 +445,20 @@ private:
             if( fread( &type, 1, 1, f ) != 1 || type > 1 )
             {
                 fclose( f );
+#if defined( TRACY_NO_EXCEPTIONS )
+                return;
+#else // if !defined( TRACY_NO_EXCEPTIONS )
                 throw NotTracyDump();
+#endif // if defined( TRACY_NO_EXCEPTIONS )
             }
             if( fread( &streams, 1, 1, f ) != 1 )
             {
                 fclose( f );
+#if defined( TRACY_NO_EXCEPTIONS )
+                return;
+#else // if !defined( TRACY_NO_EXCEPTIONS )
                 throw NotTracyDump();
+#endif // if defined( TRACY_NO_EXCEPTIONS )
             }
             m_dataOffset += 2;
         }
@@ -455,7 +473,11 @@ private:
         else
         {
             fclose( f );
+#if defined( TRACY_NO_EXCEPTIONS )
+            return;
+#else // if !defined( TRACY_NO_EXCEPTIONS )
             throw NotTracyDump();
+#endif // if defined( TRACY_NO_EXCEPTIONS )
         }
 
         struct stat64 buf;
@@ -466,14 +488,22 @@ private:
         else
         {
             fclose( f );
+#if defined( TRACY_NO_EXCEPTIONS )
+            return;
+#else // if !defined( TRACY_NO_EXCEPTIONS )
             throw FileReadError();
+#endif // if defined( TRACY_NO_EXCEPTIONS )
         }
 
         m_data = (char*)mmap( nullptr, m_dataSize, PROT_READ, MAP_SHARED, fileno( f ), 0 );
         fclose( f );
         if( !m_data )
         {
+#if defined( TRACY_NO_EXCEPTIONS )
+            return;
+#else // if !defined( TRACY_NO_EXCEPTIONS )
             throw FileReadError();
+#endif // if defined( TRACY_NO_EXCEPTIONS )
         }
 
         for( int i=0; i<(int)streams; i++ )

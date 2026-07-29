@@ -13,17 +13,18 @@ namespace detail
 TRACY_API uint32_t GetThreadHandleImpl();
 }
 
-#ifdef TRACY_ENABLE
-struct ThreadNameData
+struct TracyThreadName
 {
+    enum { MaxLength = 128 };
+    
     uint32_t id;
     int32_t groupHint;
-    const char* name;
-    ThreadNameData* next;
+
+    size_t len;
+    char str[ MaxLength + 1 ];
 };
 
-ThreadNameData* GetThreadNameData( uint32_t id );
-
+#ifdef TRACY_ENABLE
 TRACY_API uint32_t GetThreadHandle();
 #else
 static inline uint32_t GetThreadHandle()
@@ -34,7 +35,7 @@ static inline uint32_t GetThreadHandle()
 
 TRACY_API void SetThreadName( const char* name );
 TRACY_API void SetThreadNameWithHint( const char* name, int32_t groupHint );
-TRACY_API const char* GetThreadName( uint32_t id );
+TRACY_API void GetThreadName( uint32_t id, TracyThreadName *pName );
 
 TRACY_API const char* GetEnvVar( const char* name );
 

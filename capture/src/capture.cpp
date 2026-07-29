@@ -164,7 +164,8 @@ int main( int argc, char** argv )
 
     printf( "Connecting to %s:%i...", address, port );
     fflush( stdout );
-    tracy::Worker worker( address, port, memoryLimit );
+    const bool keepSingleThreadLocks = false;
+    tracy::Worker worker( address, port, memoryLimit, keepSingleThreadLocks );
     while( !worker.HasData() )
     {
         const auto handshake = worker.GetHandshakeStatus();

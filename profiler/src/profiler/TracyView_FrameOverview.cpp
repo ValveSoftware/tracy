@@ -16,13 +16,31 @@ static uint32_t GetFrameColor( uint64_t time, uint64_t target )
 
 static int GetFrameWidth( int frameScale )
 {
-    return frameScale == 0 ? 4 : ( frameScale < 0 ? 6 : 1 );
+    static int lastRet = INT16_MIN;
+    int nRet = frameScale == 0 ? 4 : ( frameScale < 0 ? (-frameScale * 6) : 1 );
+
+    if (nRet != lastRet)
+    {
+        lastRet = nRet;
+    }
+
+    return nRet;
 }
 
 static int GetFrameGroup( int frameScale )
 {
-    return frameScale < 2 ? 1 : ( 1 << ( frameScale - 1 ) );
+    static int lastRet = INT16_MIN;
+    int nRet =  frameScale < 2 ? 1 : ( 1 << ( frameScale - 1 ) );
+
+    if (nRet != lastRet)
+    {
+        lastRet = nRet;
+    }
+
+    return nRet;
+
 }
+
 
 template<class T>
 constexpr const T& clamp( const T& v, const T& lo, const T& hi )
@@ -35,9 +53,9 @@ void View::DrawFrames()
     assert( m_worker.GetFrameCount( *m_frames ) != 0 );
 
     const auto scale = GetScale();
-    const auto Height = 50 * scale;
+    auto Height = m_vd.flFrameHeight;
 
-    constexpr uint64_t MaxFrameTime = 50 * 1000 * 1000;  // 50ms
+    const uint64_t MaxFrameTime = m_vd.frameOverviewMaxTimeMS * 1000 * 1000;  // 50ms
 
     ImGuiWindow* window = ImGui::GetCurrentWindowRead();
     if( window->SkipItems ) return;
@@ -58,15 +76,36 @@ void View::DrawFrames()
     draw->AddRectFilled( wpos, wpos + ImVec2( w, Height ), 0x33FFFFFF );
     const auto wheel = io.MouseWheel;
     const auto prevScale = m_vd.frameScale;
+
+    float heightDiff = UpdateAndDrawResizeBar( m_framesResize );
+    if( fabs( heightDiff ) > 0.001f )
+    {
+        m_vd.flFrameHeight += heightDiff;
+        m_vd.flFrameHeight = std::clamp( m_vd.flFrameHeight, m_framesResize.minHeight, m_framesResize.maxHeight );
+    }
+
     if( hover )
     {
-        if( wheel > 0 )
+        const auto mx = io.MousePos.x;
+
+        if (mx > wpos.x && mx < wpos.x + w - 1)
         {
-            if( m_vd.frameScale >= 0 ) m_vd.frameScale--;
-        }
-        else if( wheel < 0 )
-        {
-            if( m_vd.frameScale < 10 ) m_vd.frameScale++;
+            const int total = m_worker.GetFrameCount( *m_frames );
+            const auto mo = mx - ( wpos.x + 1 );
+            const int fwidth = GetFrameWidth( m_vd.frameScale );
+            const int group = GetFrameGroup( m_vd.frameScale );
+            const auto off = mo * group / fwidth;
+
+            if (( m_vd.frameStart + off ) < total)
+
+            if (wheel > 0)
+            {
+                if (m_vd.frameScale > -10) m_vd.frameScale--;
+            }
+            else if (wheel < 0)
+            {
+                if (m_vd.frameScale < 10) m_vd.frameScale++;
+            }
         }
     }
 
@@ -122,6 +161,7 @@ void View::DrawFrames()
                 ImGui::BeginTooltip();
                 if( group > 1 )
                 {
+                    const auto fnum = GetFrameNumber( *m_frames, sel );
                     auto f = m_worker.GetFrameTime( *m_frames, sel );
                     auto g = std::min( group, total - sel );
                     for( int j=1; j<g; j++ )
@@ -131,13 +171,13 @@ void View::DrawFrames()
 
                     TextDisabledUnformatted( "Frames:" );
                     ImGui::SameLine();
-                    ImGui::Text( "%s - %s (%s)", RealToString( sel ), RealToString( sel + g - 1 ), RealToString( g ) );
+                    ImGui::Text( "%s - %s (%s)", RealToString( fnum ), RealToString( fnum + g - 1 ), RealToString( g ) );
                     ImGui::Separator();
                     TextFocused( "Max frame time:", TimeToString( f ) );
                     ImGui::SameLine();
                     ImGui::TextDisabled( "(%.1f FPS)", 1000000000.0 / f );
 
-                    if( IsMouseClickReleased( 1 ) ) m_setRangePopup = RangeSlim { m_worker.GetFrameTime( *m_frames, sel ), m_worker.GetFrameTime( *m_frames, sel + g - 1 ), true };
+                    if( IsMouseClickReleased( 1 ) ) m_setRangePopup = RangeSlim { m_worker.GetFrameTime( *m_frames, sel ), m_worker.GetFrameTime( *m_frames, sel + g - 1 ), true, nullptr };
                 }
                 else
                 {
@@ -243,16 +283,20 @@ void View::DrawFrames()
                     }
                 }
 
-                if( IsMouseClickReleased( 1 ) ) m_setRangePopup = RangeSlim { m_worker.GetFrameBegin( *m_frames, sel ), m_worker.GetFrameEnd( *m_frames, sel + group - 1 ), true };
+                if( IsMouseClickReleased( 1 ) ) m_setRangePopup = RangeSlim { m_worker.GetFrameBegin( *m_frames, sel ), m_worker.GetFrameEnd( *m_frames, sel + group - 1 ), true, nullptr };
             }
 
-            if( ( !m_worker.IsConnected() || m_viewMode == ViewMode::Paused ) && wheel != 0 )
+            if (( !m_worker.IsConnected() || m_viewMode == ViewMode::Paused ) && wheel != 0)
             {
                 const int pfwidth = GetFrameWidth( prevScale );
                 const int pgroup = GetFrameGroup( prevScale );
 
                 const auto oldoff = mo * pgroup / pfwidth;
-                m_vd.frameStart = std::min( total, std::max( 0, m_vd.frameStart - int( off - oldoff ) ) );
+
+                if (( m_vd.frameStart + oldoff ) < total)
+                {
+                    m_vd.frameStart = std::min( total, std::max( 0, m_vd.frameStart - int( off - oldoff ) ) );
+                }
             }
         }
     }

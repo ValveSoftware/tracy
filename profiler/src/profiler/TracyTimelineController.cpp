@@ -158,6 +158,17 @@ void TimelineController::End( double pxns, const ImVec2& wpos, bool hover, bool 
         yOffset += currentFrameItemHeight;
     }
 
+    for ( auto &item : m_items )
+    {
+        if ( item->PreventScrolling() )
+        {
+            // We don't want to scroll the window while plot resizing is ongoing
+            m_centerItemkey = nullptr;
+            m_centerItemOffsetY = 0;
+            break;
+        }
+    }
+
     if( const auto scrollY = CalculateScrollPosition() )
     {
         int clampedScrollY = std::min<int>( *scrollY, std::max<int>( yOffset - ImGui::GetWindowHeight(), 0 ) );

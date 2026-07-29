@@ -7,12 +7,16 @@
 #include <string>
 #include <vector>
 
+#include "TracyVector.hpp"
+
 namespace tracy
 {
 
 struct Annotation;
 struct SourceRegex;
 struct ViewData;
+struct PlotData;
+class Worker;
 
 class UserData
 {
@@ -26,6 +30,8 @@ public:
     const std::string& GetDescription() const { return m_description; }
     bool SetDescription( const char* description );
 
+    void LoadStateJson( ViewData& data );
+    void SaveStateJson( const ViewData& data, bool global );
     void LoadState( ViewData& data );
     void SaveState( const ViewData& data );
     void StateShouldBePreserved();
@@ -35,6 +41,9 @@ public:
 
     bool LoadSourceSubstitutions( std::vector<SourceRegex>& data );
     void SaveSourceSubstitutions( const std::vector<SourceRegex>& data );
+
+    void LoadZonePlotsJson( Worker &worker );
+    void SaveZonePlotsJson( Worker &worker, const Vector<PlotData *> &plots );
 
     const char* GetConfigLocation() const;
 

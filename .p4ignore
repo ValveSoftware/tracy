@@ -1,0 +1,13 @@
+.vs/
+.git/
+.github/
+.vscode
+*.tss
+*.vcxproj.user
+*.args.json
+build/_generated
+build/win32/_temp
+build/win32/Debug
+build/win32/Release
+capture/build
+tracy-profiler.sln.bak

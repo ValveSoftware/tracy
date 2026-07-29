@@ -10,6 +10,7 @@
 #  endif
 #  include <windows.h>
 #  include <malloc.h>
+#  include <algorithm>
 #  include "TracyUwp.hpp"
 #else
 #  include <pthread.h>
@@ -52,6 +53,7 @@ extern "C" typedef HRESULT (WINAPI *t_GetThreadDescription)( HANDLE, PWSTR* );
 #ifdef TRACY_ENABLE
 #  include <atomic>
 #  include "TracyAlloc.hpp"
+#  include "TracyMutex.hpp"
 #endif
 
 namespace tracy
@@ -103,7 +105,42 @@ TRACY_API uint32_t GetThreadHandleImpl()
 }
 
 #ifdef TRACY_ENABLE
-std::atomic<ThreadNameData*>& GetThreadNameData();
+struct ThreadNameDataLink
+{
+    TracyThreadName name;
+    ThreadNameDataLink *next;
+    ThreadNameDataLink *prev;
+};
+
+static void TracyDllAdd( ThreadNameDataLink *pNew, ThreadNameDataLink *pPrev, ThreadNameDataLink *pNext )
+{
+    pNew->next = pNext;
+    pNew->prev = pPrev;
+    pPrev->next = pNew;
+    pNext->prev = pNew;
+}
+
+static void TracyDllRemove( ThreadNameDataLink *pPrev, ThreadNameDataLink *pNext )
+{
+    pPrev->next = pNext;
+    pNext->prev = pPrev;
+}
+
+
+static TracyMutex s_NameDataLock;
+static ThreadNameDataLink s_ThreadNameDataList = { .next = &s_ThreadNameDataList, .prev = &s_ThreadNameDataList };
+static ThreadNameDataLink *s_pThreadNameDataHead = &s_ThreadNameDataList;
+
+static void ThreadNameAdd( ThreadNameDataLink *pNew, ThreadNameDataLink *pHead )
+{
+    TracyDllAdd( pNew, pHead, pHead->next );
+}
+
+static void ThreadNameRemove( ThreadNameDataLink *pDel )
+{
+    TracyDllRemove( pDel->prev, pDel->next );
+    pDel->prev = pDel->next = nullptr;
+}
 #endif
 
 #if defined _MSC_VER && !defined __clang__
@@ -198,50 +235,76 @@ TRACY_API void SetThreadNameWithHint( const char* name, int32_t groupHint )
         }
     };
 #endif
+
 #ifdef TRACY_ENABLE
+    if ( name )
     {
-        const auto sz = strlen( name );
-        char* buf = (char*)tracy_malloc( sz+1 );
-        memcpy( buf, name, sz );
-        buf[sz] = '\0';
-        auto data = (ThreadNameData*)tracy_malloc_fast( sizeof( ThreadNameData ) );
-        data->id = detail::GetThreadHandleImpl();
-        data->groupHint = groupHint;
-        data->name = buf;
-        data->next = GetThreadNameData().load( std::memory_order_relaxed );
-        while( !GetThreadNameData().compare_exchange_weak( data->next, data, std::memory_order_release, std::memory_order_relaxed ) ) {}
+        struct ThreadNameHelper
+        {
+            ThreadNameHelper()
+            {
+                link = ThreadNameDataLink{0};
+                link.name.id = detail::GetThreadHandleImpl();
+
+                s_NameDataLock.lock();
+                ThreadNameAdd( &link, s_pThreadNameDataHead );
+                s_NameDataLock.unlock();
+            }
+
+            ~ThreadNameHelper()
+            {
+                s_NameDataLock.lock();
+                ThreadNameRemove( &link );
+                s_NameDataLock.unlock();
+            }
+
+            void SetName( const char *pNameStr, int32_t groupHint )
+            {
+                s_NameDataLock.lock();
+                link.name.groupHint = groupHint;
+                int written = snprintf( link.name.str, TracyThreadName::MaxLength, "%s", pNameStr );
+                link.name.len = std::max( written, 0 );
+                link.name.str[ link.name.len ] = 0;
+                s_NameDataLock.unlock();
+            }
+
+            ThreadNameDataLink link;
+        };
+
+        static thread_local ThreadNameHelper s_tlsThreadName;
+        s_tlsThreadName.SetName( name, groupHint );
     }
 #endif
 }
 
-#ifdef TRACY_ENABLE
-ThreadNameData* GetThreadNameData( uint32_t id )
+TRACY_API void GetThreadName( uint32_t id, TracyThreadName *pName )
 {
-    auto ptr = GetThreadNameData().load( std::memory_order_relaxed );
-    while( ptr )
+    if ( !pName )
     {
-        if( ptr->id == id )
-        {
-            return ptr;
-        }
-        ptr = ptr->next;
+        return;
     }
-    return nullptr;
-}
-#endif
 
-TRACY_API const char* GetThreadName( uint32_t id )
-{
-    static char buf[256];
+    *pName = TracyThreadName{ .id = id };
+
 #ifdef TRACY_ENABLE
-    auto ptr = GetThreadNameData().load( std::memory_order_relaxed );
-    while( ptr )
     {
-        if( ptr->id == id )
+        bool foundThread = false;
+        s_NameDataLock.lock();
+        for ( ThreadNameDataLink *pLink = s_pThreadNameDataHead->next; pLink != s_pThreadNameDataHead; pLink = pLink->next )
         {
-            return ptr->name;
+            if( pLink->name.id == id )
+            {
+                *pName = pLink->name;
+                foundThread = true;
+                break;
+            }
         }
-        ptr = ptr->next;
+        s_NameDataLock.unlock();
+
+        if ( foundThread )
+        {
+            return;
+        }
     }
 #endif
 
@@ -256,52 +319,68 @@ TRACY_API const char* GetThreadName( uint32_t id )
         auto hnd = OpenThread( THREAD_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)id );
         if( hnd != 0 )
         {
-            PWSTR tmp;
-            if( SUCCEEDED( _GetThreadDescription( hnd, &tmp ) ) )
+            PWSTR wideStr;
+            if( SUCCEEDED( _GetThreadDescription( hnd, &wideStr ) ) )
             {
-                auto ret = wcstombs( buf, tmp, 256 );
+                size_t bytesWritten = wcstombs( pName->str, wideStr, TracyThreadName::MaxLength );
                 CloseHandle( hnd );
-                LocalFree( tmp );
-                if( ret != static_cast<size_t>( -1 ) )
+                LocalFree( wideStr );
+                if( bytesWritten != static_cast<size_t>( -1 ) )
                 {
-                    return buf;
+                    pName->len = bytesWritten;
+                    return;
                 }
+                else
+                {
+                    pName->len = 0;
+                }
+
+                pName->str[ pName->len ] = 0;
             }
         }
     }
 #elif defined __linux__
-  int cs, fd;
-  char path[32];
-  snprintf( path, sizeof( path ), "/proc/self/task/%d/comm", id );
-  sprintf( buf, "%" PRIu32, id );
+    {
+        int cs, fd;
+        char path[32];
+        snprintf( path, sizeof( path ), "/proc/self/task/%d/comm", id );
+        int written = snprintf( pName->str, TracyThreadName::MaxLength, "%" PRIu32, id );
+        pName->len = std::max( written, 0 );
+        pName->str[ pName->len ] = 0;
 # ifndef __ANDROID__
-   pthread_setcancelstate( PTHREAD_CANCEL_DISABLE, &cs );
+        pthread_setcancelstate( PTHREAD_CANCEL_DISABLE, &cs );
 # endif
-  if ( ( fd = open( path, O_RDONLY ) ) > 0) {
-      int len = read( fd, buf, 255 );
-      if( len > 0 )
-      {
-          buf[len] = 0;
-          if( len > 1 && buf[len-1] == '\n' )
-          {
-              buf[len-1] = 0;
-          }
-      }
-      close( fd );
-  }
+        if ( ( fd = open( path, O_RDONLY ) ) > 0) {
+            int len = read( fd, pName->str, TracyThreadName::MaxLength );
+            pName->len = (size_t)std::max( len, 0 );
+
+            if( ( len > 1 ) && ( pName->str[len - 1] == '\n' ) )
+            {
+                pName->len--;
+            }
+
+            pName->str[ pName->len ] = 0;
+            close( fd );
+        }
 # ifndef __ANDROID__
-   pthread_setcancelstate( cs, 0 );
+        pthread_setcancelstate( cs, 0 );
 # endif
-  return buf;
+        return;
+    }
 #elif defined __QNX__
-    static char qnxNameBuf[_NTO_THREAD_NAME_MAX + 1] = {0};
-    if (pthread_getname_np(static_cast<int>(id), qnxNameBuf, _NTO_THREAD_NAME_MAX) == 0) {
-        return qnxNameBuf;
-    };
+    static thread_local char qnxNameBuf[_NTO_THREAD_NAME_MAX + 1] = {0};
+    if (pthread_getname_np(static_cast<int>(id), qnxNameBuf, _NTO_THREAD_NAME_MAX) == 0)
+    {
+        int written = snprintf( pName, name, TracyThreadName::MaxLength, "%s", qnxNameBuf );
+        pName->len = std::max( written, 0 );
+        pName->str[ pName->len ] = 0;
+        return;
+    }
 #endif
 
-  sprintf( buf, "%" PRIu32, id );
-  return buf;
+    int written = snprintf( pName->str, TracyThreadName::MaxLength, "%" PRIu32, id );
+    pName->len = std::max( written, 0 );
+    pName->str[ pName->len ] = 0;
 }
 
 TRACY_API const char* GetEnvVar( const char* name )

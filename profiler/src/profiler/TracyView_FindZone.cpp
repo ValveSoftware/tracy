@@ -20,7 +20,9 @@ extern double s_time;
 void View::FindZones()
 {
     m_findZone.hasResults = true;
-    m_findZone.match = m_worker.GetMatchingSourceLocation( m_findZone.pattern, m_findZone.ignoreCase );
+	// Original source-location-only implementation
+    //m_findZone.match = m_worker.GetMatchingSourceLocation( m_findZone.pattern, m_findZone.ignoreCase );
+    m_findZone.match = m_worker.GetMatchingZonePattern( m_findZone.pattern, m_findZone.ignoreCase );
     if( m_findZone.match.empty() ) return;
 
     auto it = m_findZone.match.begin();
@@ -36,6 +38,24 @@ void View::FindZones()
         }
     }
 }
+
+void View::CreateZonePlot( const ZoneEvent &ev, PlotFilterType filterType, uint64_t filterId, bool bAggregatePerFrame, PlotData *pAddToExistingPlot )
+{
+    while ( pAddToExistingPlot && pAddToExistingPlot->nextPlot )
+    {
+        pAddToExistingPlot = pAddToExistingPlot->nextPlot;
+    }
+
+    m_worker.CreatePlotForSourceLocation(  
+		ev.SrcLoc(),
+		filterType,
+		filterId,
+		bAggregatePerFrame, 
+		( bAggregatePerFrame ? PlotDrawType::Step : PlotDrawType::Bar ),
+		pAddToExistingPlot );
+    m_requestSaveZonePlots = true;
+}
+
 #endif
 
 uint64_t View::GetSelectionTarget( const Worker::ZoneThreadData& ev, FindZone::GroupBy groupBy ) const
@@ -62,7 +82,7 @@ uint64_t View::GetSelectionTarget( const Worker::ZoneThreadData& ev, FindZone::G
         return m_worker.GetZoneExtra( *ev.Zone() ).callstack.Val();
     case FindZone::GroupBy::Parent:
     {
-        const auto parent = GetZoneParent( *ev.Zone(), m_worker.DecompressThread( ev.Thread() ) );
+        const auto parent = GetZoneParent( *ev.Zone(), m_worker.DecompressThread( ev.Thread() ), m_worker );
         return parent ? uint64_t( parent->SrcLoc() ) : 0;
     }
     case FindZone::GroupBy::NoGrouping:
@@ -78,7 +98,7 @@ void View::DrawZoneList( int id, const Vector<short_ptr<ZoneEvent>>& zones )
     const auto zsz = zones.size();
     char buf[32];
     sprintf( buf, "%i##zonelist", id );
-    if( !ImGui::BeginTable( buf, 3, ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_Resizable | ImGuiTableFlags_Hideable | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Sortable | ImGuiTableFlags_ScrollY, ImVec2( 0, ImGui::GetTextLineHeightWithSpacing() * std::min<size_t>( zsz + 1, 15 ) ) ) )
+    if( !ImGui::BeginTable( buf, 4, ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_Resizable | ImGuiTableFlags_Hideable | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Sortable | ImGuiTableFlags_ScrollY, ImVec2( 0, ImGui::GetTextLineHeightWithSpacing() * std::min<size_t>( zsz + 1, 15 ) ) ) )
     {
         ImGui::TreePop();
         return;
@@ -86,6 +106,7 @@ void View::DrawZoneList( int id, const Vector<short_ptr<ZoneEvent>>& zones )
     ImGui::TableSetupScrollFreeze( 0, 1 );
     ImGui::TableSetupColumn( "Time from start" );
     ImGui::TableSetupColumn( "Execution time", ImGuiTableColumnFlags_PreferSortDescending );
+    ImGui::TableSetupColumn( "Self time", ImGuiTableColumnFlags_PreferSortDescending );
     ImGui::TableSetupColumn( "Name", ImGuiTableColumnFlags_NoSort );
     ImGui::TableHeadersRow();
 
@@ -170,6 +191,22 @@ void View::DrawZoneList( int id, const Vector<short_ptr<ZoneEvent>>& zones )
             if( sortspec.SortDirection == ImGuiSortDirection_Descending )
             {
                 pdqsort_branchless( sortedZones.begin(), sortedZones.end(), [this]( const auto& lhs, const auto& rhs ) {
+                        return m_worker.GetZoneEndDirect( *lhs ) - lhs->Start() - this->GetZoneChildTimeFast( *lhs ) >
+                               m_worker.GetZoneEndDirect( *rhs ) - rhs->Start() - this->GetZoneChildTimeFast( *rhs );
+                    } );
+            }
+            else
+            {
+                pdqsort_branchless( sortedZones.begin(), sortedZones.end(), [this]( const auto& lhs, const auto& rhs ) {
+                        return m_worker.GetZoneEndDirect( *lhs ) - lhs->Start() - this->GetZoneChildTimeFast( *lhs ) <
+                               m_worker.GetZoneEndDirect( *rhs ) - rhs->Start() - this->GetZoneChildTimeFast( *rhs );
+                    } );
+            }
+            break;
+        case 3:
+            if( sortspec.SortDirection == ImGuiSortDirection_Descending )
+            {
+                pdqsort_branchless( sortedZones.begin(), sortedZones.end(), [this]( const auto& lhs, const auto& rhs ) {
                     const auto hle = m_worker.HasZoneExtra( *lhs );
                     const auto hre = m_worker.HasZoneExtra( *rhs );
                     if( !( hle & hre ) ) return hle > hre;
@@ -204,6 +241,7 @@ void View::DrawZoneList( int id, const Vector<short_ptr<ZoneEvent>>& zones )
             auto ev = (*zonesToIterate)[i].get();
             const auto end = m_worker.GetZoneEndDirect( *ev );
             int64_t timespan;
+            int64_t selftimespan;
             if( m_findZone.runningTime )
             {
                 const auto ctx = m_worker.GetContextSwitchData( GetZoneThread( *ev ) );
@@ -213,7 +251,7 @@ void View::DrawZoneList( int id, const Vector<short_ptr<ZoneEvent>>& zones )
             else
             {
                 timespan = end - ev->Start();
-                if( m_findZone.selfTime ) timespan -= GetZoneChildTimeFast( *ev );
+                selftimespan = ( timespan - GetZoneChildTimeFast( *ev ) );
             }
 
             ImGui::PushID( ev );
@@ -235,6 +273,8 @@ void View::DrawZoneList( int id, const Vector<short_ptr<ZoneEvent>>& zones )
 
             ImGui::TableNextColumn();
             ImGui::TextUnformatted( TimeToString( timespan ) );
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted( TimeToString( selftimespan ) );
             ImGui::TableNextColumn();
             if( m_worker.HasZoneExtra( *ev ) )
             {
@@ -1412,6 +1452,173 @@ void View::DrawFindZone()
 
         ImGui::Separator();
         SmallCheckbox( "Show zone time in frames", &m_findZone.showZoneInFrames );
+        if ( zoneData.zones.size() > 0 )
+        {
+            ImGui::Separator();
+
+			if ( ImGui::TreeNodeEx( "Plots ...", ImGuiTreeNodeFlags_DefaultOpen ) )
+			{
+				static bool s_bAddToExistingPlotCheckbox = false;
+				static PlotData *s_pAddToExistingPlot = nullptr;
+				PlotData *pFirstZonePlot = nullptr;
+				for ( PlotData *pPlot : m_worker.GetPlots() )
+				{
+					if ( pPlot->type == PlotType::Zone )
+					{
+						pFirstZonePlot = pPlot;
+						break;
+					}
+				}
+				
+				if ( pFirstZonePlot )
+				{
+					SmallCheckbox( "Add to existing plot", &s_bAddToExistingPlotCheckbox );
+					if ( s_bAddToExistingPlotCheckbox )
+					{
+						ImGui::SameLine();
+						
+						// Check the old selected plot is still valid, if not make the first plot the active selection
+						bool bOldExistingPlotStillValid = false;
+						for ( PlotData *pPlot : m_worker.GetPlots() )
+						{
+							if ( ( pPlot->type == PlotType::Zone ) && ( pPlot == s_pAddToExistingPlot ) )
+							{
+								bOldExistingPlotStillValid = true;
+							}
+						}
+						if ( !bOldExistingPlotStillValid )
+						{
+							s_pAddToExistingPlot = pFirstZonePlot;
+						}
+
+						// Build plots dropdown
+						if ( ImGui::BeginCombo( "##addToExistingPlots", m_worker.GetString( s_pAddToExistingPlot->name ) ) )
+						{
+							for ( PlotData *pPlot : m_worker.GetPlots() )
+							{
+								if ( pPlot->type == PlotType::Zone )
+								{
+									ImGui::PushID( ( void * ) pPlot );
+
+									bool isSelected = ( pPlot == s_pAddToExistingPlot );
+									if ( ImGui::Selectable( m_worker.GetString( pPlot->name ), isSelected ) )
+									{
+										s_pAddToExistingPlot = pPlot;
+									}
+									if ( isSelected )
+									{
+										ImGui::SetItemDefaultFocus();
+									}
+
+									if ( pPlot->nextPlot )
+									{
+										if ( ImGui::IsItemHovered() )
+										{
+											static char tooltipStr[ 4096 ];
+											tooltipStr[ 0 ] = 0;
+											PlotData *pNextPlot = pPlot;
+											while ( pNextPlot )
+											{
+												if ( tooltipStr[ 0 ] ) strcat( tooltipStr, "\n" );
+												if ( pNextPlot->type == PlotType::Zone )
+												{
+													strcat( tooltipStr, "* " );
+													strcat( tooltipStr, m_worker.GetString( pNextPlot->name ) );
+												}
+												pNextPlot = pNextPlot->nextPlot;
+											}
+
+											ImGui::BeginTooltip();
+											TextDisabledUnformatted( tooltipStr );
+											ImGui::EndTooltip();
+										}
+
+										ImGui::SameLine();
+										TextDisabledUnformatted( " (...)" );
+									}
+
+									ImGui::PopID();
+								}
+							}							
+							ImGui::EndCombo();
+						}
+
+					}
+					else
+					{
+						s_pAddToExistingPlot = nullptr;
+					}
+					ImGui::Separator();
+				}
+				else
+				{
+					s_pAddToExistingPlot = nullptr;
+				}
+
+				//
+				// ALL ZONES
+				//
+				ImGui::TextUnformatted( "Plot all zones matching current source location:" );
+				ImGui::Indent();
+				if ( ImGui::Button( ICON_FA_CHART_LINE " Plot all zones" ) )
+				{
+					CreateZonePlot( *zoneData.zones[ 0 ].Zone(), PlotFilterType::NoFilter, 0, false, s_pAddToExistingPlot );
+				}
+				ImGui::SameLine();
+				if ( ImGui::Button( ICON_FA_CHART_LINE " Plot all zones (per-frame total)" ) )
+				{
+					CreateZonePlot( *zoneData.zones[ 0 ].Zone(), PlotFilterType::NoFilter, 0, true, s_pAddToExistingPlot );
+				}
+				ImGui::Unindent();
+				ImGui::Separator();
+
+				//
+				// FILTERED ZONES
+				//
+
+				static const PlotFilterType mapsGroupByToPlotFilterType[] =
+				{
+					PlotFilterType::Thread,		// FindZone::GroupBy::Thread
+					PlotFilterType::UserText,	// FindZone::GroupBy::UserText
+					PlotFilterType::ZoneName,	// FindZone::GroupBy::ZoneName
+					PlotFilterType::Callstack,	// FindZone::GroupBy::Callstack
+					PlotFilterType::Parent,		// FindZone::GroupBy::Parent
+					PlotFilterType::NoFilter	// FindZone::GroupBy::NoGrouping
+				};
+				static_assert( ( sizeof( mapsGroupByToPlotFilterType ) / sizeof( mapsGroupByToPlotFilterType[0]) ) == ( (int)FindZone::GroupBy::NoGrouping + 1 ) );
+				bool bValidZoneFilter = ( m_findZone.selGroup != m_findZone.Unselected );
+				PlotFilterType plotFilterType = mapsGroupByToPlotFilterType[ (int)m_findZone.groupBy ];
+
+				ImGui::TextUnformatted( "Plot selected group zones:" );
+				ImGui::SameLine();
+				DrawHelpMarker( "Select a group from the 'found zones' section below." );
+				ImGui::Indent();
+				if ( bValidZoneFilter )
+				{
+					static char currentSelectionString[ 1024 ];
+					snprintf( currentSelectionString, 1024, "[by %s] %s",
+							  m_worker.PlotHelper_GetStringForFilterType( plotFilterType ),
+							  m_worker.PlotHelper_GetStringForFilterId( zoneData.zones[ 0 ].Zone()->SrcLoc(), plotFilterType, m_findZone.selGroup));
+					TextFocused( "Current group selection:", currentSelectionString );
+				}
+				else
+				{
+					TextFocused( "Current group selection:", "none" );
+				}
+				if ( ButtonDisablable( ICON_FA_CHART_LINE " Plot selected", !bValidZoneFilter ) )
+				{
+					CreateZonePlot( *zoneData.zones[ 0 ].Zone(), plotFilterType, m_findZone.selGroup, false, s_pAddToExistingPlot );
+				}
+				ImGui::SameLine();
+				if ( ButtonDisablable( ICON_FA_CHART_LINE " Plot selected (per-frame total)", !bValidZoneFilter ) )
+				{
+					CreateZonePlot( *zoneData.zones[ 0 ].Zone(), plotFilterType, m_findZone.selGroup, true, s_pAddToExistingPlot );
+				}
+				ImGui::Unindent();
+
+				ImGui::TreePop();
+			}
+        }
         ImGui::Separator();
 
         ImGui::AlignTextToFramePadding();
@@ -1500,6 +1707,21 @@ void View::DrawFindZone()
                 continue;
             }
 
+            // filter by zone name, IF we are also grouping by zone name
+            if( m_findZone.groupBy == FindZone::GroupBy::ZoneName )
+            {
+                if( m_worker.HasZoneExtra( *ev.Zone() ) && m_worker.GetZoneExtra( *ev.Zone() ).text.Active() )
+                {
+                    auto text = m_worker.GetString( m_worker.GetZoneExtra( *ev.Zone() ).name );
+                    if( !strstr_nocase( text, m_findZone.pattern ) )
+                    {
+                        m_filteredZones.insert( &ev );
+                        zptr++;
+                        continue;
+                    }
+                }
+            }
+
             if( m_userTextFilter.IsActive() )
             {
                 bool keep = false;
@@ -1584,7 +1806,7 @@ void View::DrawFindZone()
                 break;
             case FindZone::GroupBy::Parent:
             {
-                const auto parent = GetZoneParent( *ev.Zone(), m_worker.DecompressThread( ev.Thread() ) );
+                const auto parent = GetZoneParent( *ev.Zone(), m_worker.DecompressThread( ev.Thread() ), m_worker );
                 if( parent ) gid = uint64_t( uint16_t( parent->SrcLoc() ) );
                 break;
             }
@@ -1842,6 +2064,15 @@ void View::DrawFindZone()
                     assert( false );
                     break;
                 }
+         
+                if( m_findZone.groupBy == FindZone::GroupBy::ZoneName )
+                {
+                    if( !strstr_nocase( hdrString, m_findZone.pattern ) )
+                    {
+                        continue;
+                    }
+                }
+
                 ImGui::PushID( v->first );
                 const bool expand = ImGui::TreeNodeEx( hdrString, ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_OpenOnDoubleClick | ( v->first == m_findZone.selGroup ? ImGuiTreeNodeFlags_Selected : 0 ) );
                 if( ImGui::IsItemClicked() )

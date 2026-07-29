@@ -2,6 +2,7 @@
 
 #include "TracyColor.hpp"
 #include "TracyPrint.hpp"
+#include "TracyTimelineContext.hpp"
 #include "TracyUtility.hpp"
 #include "TracyView.hpp"
 
@@ -236,7 +237,7 @@ const ZoneEvent* View::GetZoneParent( const ZoneEvent& zone ) const
             auto it = std::lower_bound( slz.zones.begin(), slz.zones.end(), zone.Start(), [] ( const auto& lhs, const auto& rhs ) { return lhs.Zone()->Start() < rhs; } );
             if( it != slz.zones.end() && it->Zone() == &zone )
             {
-                return GetZoneParent( zone, m_worker.DecompressThread( it->Thread() ) );
+                return GetZoneParent( zone, m_worker.DecompressThread( it->Thread() ), m_worker );
             }
         }
     }
@@ -275,9 +276,9 @@ const ZoneEvent* View::GetZoneParent( const ZoneEvent& zone ) const
     return nullptr;
 }
 
-const ZoneEvent* View::GetZoneParent( const ZoneEvent& zone, uint64_t tid ) const
+const ZoneEvent* View::GetZoneParent( const ZoneEvent& zone, uint64_t tid, const Worker &worker ) const
 {
-    const auto thread = m_worker.GetThreadData( tid );
+    const auto thread = worker.GetThreadData( tid );
     const ZoneEvent* parent = nullptr;
     const Vector<short_ptr<ZoneEvent>>* timeline = &thread->timeline;
     if( timeline->empty() ) return nullptr;
@@ -292,7 +293,7 @@ const ZoneEvent* View::GetZoneParent( const ZoneEvent& zone, uint64_t tid ) cons
             if( it == &zone ) return parent;
             if( !it->HasChildren() ) break;
             parent = it;
-            timeline = &m_worker.GetZoneChildren( parent->Child() );
+            timeline = &worker.GetZoneChildren( parent->Child() );
         }
         else
         {
@@ -302,7 +303,7 @@ const ZoneEvent* View::GetZoneParent( const ZoneEvent& zone, uint64_t tid ) cons
             if( *it == &zone ) return parent;
             if( !(*it)->HasChildren() ) break;
             parent = *it;
-            timeline = &m_worker.GetZoneChildren( parent->Child() );
+            timeline = &worker.GetZoneChildren( parent->Child() );
         }
     }
     return nullptr;
@@ -561,7 +562,7 @@ const GpuCtxData* View::GetZoneCtx( const GpuEvent& zone ) const
     return nullptr;
 }
 
-int64_t View::GetZoneChildTime( const ZoneEvent& zone )
+int64_t View::GetZoneChildTimeClamped( const ZoneEvent &zone, int64_t start, int64_t end )
 {
     int64_t time = 0;
     if( zone.HasChildren() )
@@ -572,7 +573,12 @@ int64_t View::GetZoneChildTime( const ZoneEvent& zone )
             auto& vec = *(Vector<ZoneEvent>*)&children;
             for( auto& v : vec )
             {
-                const auto childSpan = std::max( int64_t( 0 ), v.End() - v.Start() );
+                const int64_t vstart = v.Start();
+                const int64_t vend = v.End();
+
+                const int64_t clampedstart = std::max( vstart, start );
+                const int64_t clampedend = std::min( vend, end );
+                const auto childSpan = std::max( int64_t( 0 ), clampedend - clampedstart );
                 time += childSpan;
             }
         }
@@ -580,12 +586,24 @@ int64_t View::GetZoneChildTime( const ZoneEvent& zone )
         {
             for( auto& v : children )
             {
-                const auto childSpan = std::max( int64_t( 0 ), v->End() - v->Start() );
+                const int64_t vstart = v->Start();
+                const int64_t vend = v->End();
+
+                const int64_t clampedstart = std::max( vstart, start );
+                const int64_t clampedend = std::min( vend, end );
+                const auto childSpan = std::max( int64_t( 0 ), clampedend - clampedstart );
                 time += childSpan;
             }
         }
     }
     return time;
+}
+
+int64_t View::GetZoneChildTime( const ZoneEvent& zone )
+{
+    const int64_t start = zone.Start();
+    const int64_t end = m_worker.GetZoneEnd( zone );
+    return GetZoneChildTimeClamped( zone, start, end );
 }
 
 int64_t View::GetZoneChildTime( const GpuEvent& zone )
@@ -681,6 +699,13 @@ int64_t View::GetZoneChildTimeFastClamped( const ZoneEvent& zone, int64_t t0, in
     return time;
 }
 
+int64_t View::GetZoneSelfTimeClamped( const ZoneEvent &zone, int64_t start, int64_t end )
+{
+    const auto ztime = end - start;
+    const auto selftime = ztime - GetZoneChildTimeClamped( zone, start, end );
+    return selftime;
+}
+
 int64_t View::GetZoneSelfTime( const ZoneEvent& zone )
 {
     if( m_cache.zoneSelfTime.first == &zone ) return m_cache.zoneSelfTime.second;
@@ -737,6 +762,35 @@ bool View::GetZoneRunningTime( const ContextSwitch* ctx, const ZoneEvent& ev, in
     return true;
 }
 
+bool View::GetZoneRunningTime( const ContextSwitch* ctx, const ZoneEvent& ev, const RangeSlim& range, int64_t& time, uint64_t& cnt )
+{
+    const auto start = std::max( ev.Start(), range.min );
+    auto it = std::lower_bound( ctx->v.begin(), ctx->v.end(), start, [] ( const auto& l, const auto& r ) { return (uint64_t)l.End() < (uint64_t)r; } );
+    if( it == ctx->v.end() ) return false;
+    const auto end = std::min( m_worker.GetZoneEnd( ev ), range.max );
+    const auto eit = std::upper_bound( it, ctx->v.end(), end, [] ( const auto& l, const auto& r ) { return l < r.Start(); } );
+    if( eit == ctx->v.end() ) return false;
+    cnt = std::distance( it, eit );
+    if( cnt == 0 ) return false;
+    if( cnt == 1 )
+    {
+        time = end - start;
+    }
+    else
+    {
+        int64_t running = it->End() - start;
+        ++it;
+        for( uint64_t i=0; i<cnt-2; i++ )
+        {
+            running += it->End() - it->Start();
+            ++it;
+        }
+        running += end - it->Start();
+        time = running;
+    }
+    return true;
+}
+
 const char* View::SourceSubstitution( const char* srcFile ) const
 {
     if( !m_sourceRegexValid || m_sourceSubstitutions.empty() ) return srcFile;
@@ -757,19 +811,13 @@ int64_t View::AdjustGpuTime( int64_t time, int64_t begin, int drift )
     return time + t / 1000000000 * drift;
 }
 
-uint64_t View::GetFrameNumber( const FrameData& fd, int i ) const
+int64_t View::GetFrameNumber( const FrameData& fd, int i ) const
 {
     if( fd.name == 0 )
     {
-        const auto offset = m_worker.GetFrameOffset();
-        if( offset == 0 )
-        {
-            return i;
-        }
-        else
-        {
-            return i + offset - 1;
-        }
+        const int64_t frameOffset = (int64_t)m_worker.GetFrameOffset();
+        const int64_t frameAdjust = ( m_worker.IsOnDemand() ? 3 : 2 );
+		return i + frameOffset - frameAdjust;
     }
     else
     {
@@ -903,5 +951,330 @@ void View::UpdateTitle()
         m_stcb( captureName );
     }
 }
+
+const ThreadData *View::GetThreadDataForCpu( uint8_t cpu, int64_t time )
+{
+	const auto cpuData = m_worker.GetCpuData();
+	const auto cpuCnt = m_worker.GetCpuDataCpuCount();
+	if ( ( cpu < cpuCnt ) && !cpuData[ cpu ].cs.empty() )
+	{
+		auto &cs = cpuData[ cpu ].cs;
+		auto it = std::lower_bound( cs.begin(), cs.end(), time, [] ( const auto &l, const auto &r ) { return ( uint64_t ) l.End() < ( uint64_t ) r; } );
+		if ( it != cs.end() && it->Start() <= time && it->End() >= time )
+		{
+			return m_worker.GetThreadData( m_worker.DecompressThreadExternal( it->Thread() ) );
+		}
+	}
+
+	return nullptr;
+}
+
+float UpdateAndDrawResizeBar( TimelineResizeBar &resizeBar )
+{
+    float startY = ImGui::GetCursorPosY();
+
+    float oldHeight = resizeBar.height;
+    float newHeight = resizeBar.height;
+
+    // Unfortuantely ImGui only uses the active color, if the item is active *and* hovered
+    // Otherwise, if it is hovered, it uses the hovered color.
+    // Otherwise it uses the button color.
+    // This code unfortunately lags behind so we can manage to "unhover" the button while dragging
+    // which would result in visual color glitches.
+    const ImVec4 colButton = ( resizeBar.wasActive ? resizeBar.colActive : resizeBar.color );
+    ImGui::PushStyleColor( ImGuiCol_Button, colButton );
+    ImGui::PushStyleColor( ImGuiCol_ButtonActive, resizeBar.colActive );
+    ImGui::PushStyleColor( ImGuiCol_ButtonHovered, resizeBar.colHover );
+    ImVec2 buttonSize( -1.0f, resizeBar.thickness );
+
+    ImGui::PushStyleVar( ImGuiStyleVar_FramePadding, ImVec2( 0, 0 ) );
+    ImGui::PushStyleVar( ImGuiStyleVar_ItemSpacing, ImVec2( 0, 0 ) );
+    ImGui::PushStyleVar( ImGuiStyleVar_ItemInnerSpacing, ImVec2( 0, 0 ) );
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    float origFontScale = window->FontWindowScale;
+    float scale = ( resizeBar.thickness / ImGui::GetFontSize() );
+    ImGui::SetWindowFontScale( scale );
+#define GL ICON_FA_GRIP_LINES
+    ImGui::Button(GL GL GL GL GL GL GL GL GL "##ResizeBar", buttonSize);
+#undef GL
+    ImGui::SetWindowFontScale( origFontScale );
+    ImGui::PopStyleVar( 3 );
+    ImGui::PopStyleColor(3);
+
+    resizeBar.id = ImGui::GetItemID();
+
+    float endY = ImGui::GetCursorPosY();
+    float rawUiHeight = ( endY - startY );
+    resizeBar.uiHeight = rawUiHeight + ImGui::GetStyle().ItemSpacing.y * 2;
+    assert( resizeBar.uiHeight >= 0.0f );
+
+    bool isResizeBarActive = ImGui::IsItemActive();
+    bool isResizeBarHovered = ImGui::IsItemHovered();
+    resizeBar.wasActive = isResizeBarActive;
+
+    if ( isResizeBarActive )
+    {
+        ImGui::SetMouseCursor( ImGuiMouseCursor_ResizeNS );
+        ImVec2 origMouseDelta = ImGui::GetIO().MouseDelta;
+        const float adjustedHeight = ( resizeBar.height + origMouseDelta.y );
+        const float newHeightClamped = ImClamp( adjustedHeight, resizeBar.minHeight, resizeBar.maxHeight );
+        const float mouseDelta = ( newHeightClamped - resizeBar.height );
+        newHeight = newHeightClamped;
+    }
+
+    if ( isResizeBarHovered )
+    {
+        ImGui::SetMouseCursor( ImGuiMouseCursor_ResizeNS );
+        ImGui::SetTooltip( "Drag to resize\n"
+                           "Double click to resize to default height: %d",
+                           (int)resizeBar.defaultHeight );
+
+        if ( ImGui::IsMouseDoubleClicked( ImGuiMouseButton_Left ) )
+        {
+            newHeight = resizeBar.defaultHeight;
+        }
+    }
+
+    resizeBar.height = ImClamp( newHeight, resizeBar.minHeight, resizeBar.maxHeight );
+    assert( resizeBar.height > 0.0f );
+
+    float diff = ( newHeight - oldHeight );
+    return diff;
+}
+
+
+void View::DrawTrackUiControls( const TimelineContext &ctx, const char* label, int maxDepth, int depth, TrackUiData& rData, ViewData::Track& rVdTrackSettings, int start, int &offset, float xOffset )
+{
+    if ( rData.preventScroll > 0 )
+    {
+        rData.preventScroll--;
+    }
+
+    const uint8_t uiControlLoc = m_vd.uiControlLoc;
+    if ( uiControlLoc == ViewData::UiCtrlLocHidden )
+    {
+        return;
+    }
+
+    const float inputItemWidth = 90.0f;
+
+    const char *controlPopupName = "UiControlsPopup";
+    const char *radioDynamicLabel = "Dynamic##uiCtrlStackCollapseClamp";
+    const char *radioMaxLabel = "Max##uiCtrlStackCollapseClamp";
+    const char *radioLimitLabel = "Limit##uiCtrlStackCollapseClamp";
+    const char *inputLabel = "##uiCtrlStackCollapseClampLimit";
+
+    ImVec2 startPos( xOffset, start);
+    ImGui::SetCursorPos( startPos );
+
+    const bool isDisabled = !rData.settings.shouldOverride;
+
+    ImVec4 bgcol = ImGui::GetStyleColorVec4( ImGuiCol_FrameBgActive );
+    ImVec4 hovcol = ImGui::GetStyleColorVec4( ImGuiCol_FrameBgHovered );
+    ImVec4 framecol = ImGui::GetStyleColorVec4( ImGuiCol_FrameBg );
+    ImVec4 fontcol = ImGui::GetStyleColorVec4( ImGuiCol_Text );
+
+    bgcol.w = 1.0f;
+    hovcol.w = 1.0f;
+    framecol.w = 1.0f;
+
+    ImVec4 xbgcol = bgcol;
+    ImVec4 xhovcol = hovcol;
+    ImVec4 xframecol = framecol;
+    ImVec4 xfontcol = fontcol;
+
+    if ( isDisabled )
+    {
+        xbgcol = ImVec4( 0.2f, 0.2f, 0.2f, 1.0f );
+        xhovcol = ImVec4( 0.2f, 0.2f, 0.2f, 1.0f );
+        xframecol = ImVec4( 0.2f, 0.2f, 0.2f, 1.0f );
+        xfontcol = ImVec4( 0.4f, 0.4f, 0.4f, 1.0f );
+    }
+
+    ImVec4 lockColor( 1.0f, 0.85f, 0.85f, 1.0f );
+    const char *pButtonText = ICON_FA_LOCK;
+    bool shouldOverride = rData.settings.shouldOverride;
+    if ( shouldOverride )
+    {
+        lockColor = ImVec4( 0.85f, 1.0f, 0.85f, 1.0f );
+        pButtonText = ICON_FA_LOCK_OPEN;
+    }
+
+    const ImVec2 wndContentRegionMax = ImGui::GetWindowContentRegionMax();
+
+    const auto GetLabelWidth = [] ( const char *label ) -> float
+    {
+        float framePaddingWdith = ImGui::GetStyle().FramePadding.x;
+        const float width = ImGui::CalcTextSize(label, NULL, true).x + framePaddingWdith * 2.0f;
+        return width;
+    };
+
+    // lock button width
+    const float lockButtonWidth = GetLabelWidth(pButtonText);
+
+    // radio button sizewidth
+    const float innerSpacingWidth = ImGui::GetStyle().ItemInnerSpacing.x;
+    const float radioDynWidth = GetLabelWidth(radioDynamicLabel) + innerSpacingWidth + ImGui::GetFrameHeight();
+    const float radioMaxWidth = GetLabelWidth(radioMaxLabel) + innerSpacingWidth + ImGui::GetFrameHeight();
+    const float radioLimitWidth = GetLabelWidth(radioLimitLabel) + innerSpacingWidth + ImGui::GetFrameHeight();
+
+    // input width
+    ImGui::PushItemWidth( inputItemWidth );
+    const float buttonSize = ImGui::GetFrameHeight();
+    const float inputFieldWidth = ImMax(1.0f, ImGui::CalcItemWidth() - (buttonSize + innerSpacingWidth) * 2);
+    const float incButtonWidth = innerSpacingWidth + ImMax(buttonSize, GetLabelWidth("+")); // 19
+    const float decButtonWidth = innerSpacingWidth + ImMax(buttonSize, GetLabelWidth("-"));
+    const float inputWidth = inputFieldWidth + incButtonWidth + decButtonWidth;
+    ImGui::PopItemWidth();
+
+    // total ui control width
+    const float itemSpacingWidth = ImGui::GetStyle().ItemSpacing.x;
+    const float uiSingleLineElementsWidth =   lockButtonWidth 
+                                            + itemSpacingWidth + radioDynWidth 
+                                            + itemSpacingWidth + radioMaxWidth 
+                                            + itemSpacingWidth + radioLimitWidth 
+                                            + itemSpacingWidth + inputWidth;
+
+    bool renderControls = false;
+    bool isPopup = false;
+
+    const float ctrlButtonWidth = GetLabelWidth( ICON_FA_BARS );
+
+    if ( uiControlLoc == ViewData::UiCtrlLocRight )
+    {
+        ImGui::SetCursorPosX( wndContentRegionMax.x - ctrlButtonWidth );
+    }
+
+    {
+        ImVec4 curCol = ImGui::GetStyle().Colors[ImGuiCol_Text];
+        const ImVec4 overrideCol( 0.75f, 1.0f, 0.75f, 1.0f );
+        const ImVec4 buttonColor = shouldOverride ? overrideCol : curCol;
+        ImGui::PushStyleColor( ImGuiCol_Text, buttonColor );
+        if( ImGui::SmallButton( ICON_FA_BARS ) )
+        {
+            ImGui::OpenPopup( controlPopupName );
+        }
+        ImGui::PopStyleColor( 1 );
+    }
+
+    if ( ImGui::BeginPopup( controlPopupName ) )
+    {
+        if ( ( label != nullptr ) && ( label[ 0 ] != 0 ) )
+        {
+            ImGui::Text( label );
+        }
+        else
+        {
+            ImGui::Text( "unknown core" );
+        }
+        isPopup = true;
+        renderControls = true;
+    }
+
+    if ( renderControls )
+    {
+        if ( !isPopup )
+            ImGui::PushStyleVar( ImGuiStyleVar_FramePadding, ImVec2( 0, 0 ) );
+
+        TrackUiSettings origSettings = rData.settings;
+
+        ImGui::PushStyleColor( ImGuiCol_Text, lockColor );
+        if ( ImGui::Button( pButtonText ) )
+        {
+            rData.settings.shouldOverride = !rData.settings.shouldOverride;
+        }
+        ImGui::SetItemTooltip( "Click to override global thread collapse settings" );
+        ImGui::PopStyleColor( 1 );
+
+        ImGui::PushItemFlag( ImGuiItemFlags_Disabled, isDisabled );
+
+        ImGui::PushStyleColor( ImGuiCol_FrameBgActive, xbgcol );
+        ImGui::PushStyleColor( ImGuiCol_FrameBgHovered, xhovcol );
+        ImGui::PushStyleColor( ImGuiCol_FrameBg, xframecol );
+        ImGui::PushStyleColor( ImGuiCol_Text, xfontcol );
+
+        int ival = std::clamp( ( int ) rData.settings.stackCollapseMode, 0, 2 );
+
+        if ( !isPopup )
+        {
+            ImGui::SameLine();
+        }
+        ImGui::RadioButton( radioDynamicLabel, &ival, ViewData::CollapseDynamic );
+        if ( !isPopup )
+        {
+            ImGui::SameLine();
+        }
+        ImGui::RadioButton( radioMaxLabel, &ival, ViewData::CollapseMax );
+        if ( !isPopup )
+        {
+            ImGui::SameLine();
+        }
+        ImGui::RadioButton( radioLimitLabel, &ival, ViewData::CollapseLimit );
+
+        rData.settings.stackCollapseMode = ival;
+
+        ImGui::SetNextItemWidth( inputItemWidth );
+
+        if ( !isPopup )
+        {
+            ImGui::SameLine();
+        }
+
+        int tmp = ( ( rData.settings.stackCollapseMode == ViewData::CollapseMax ) ? maxDepth : rData.settings.stackCollapseClamp );
+        if ( ImGui::InputInt( inputLabel, &tmp ) )
+        {
+            rData.settings.stackCollapseClamp = tmp;
+            rData.settings.stackCollapseMode = ViewData::CollapseLimit;
+        }
+
+        if ( !rData.settings.shouldOverride )
+        {
+            rData.settings.stackCollapseMode = m_vd.stackCollapseMode;
+            rData.settings.stackCollapseClamp = m_vd.stackCollapseClamp;
+        }
+
+        if ( maxDepth >= 1 )
+        {
+            rData.settings.stackCollapseClamp = std::clamp( rData.settings.stackCollapseClamp, 1, maxDepth );
+        }
+
+        if ( rData.settings.stackCollapseMode == ViewData::CollapseMax )
+        {
+            rData.settings.stackCollapseClamp = maxDepth;
+        }
+        else if ( rData.settings.stackCollapseMode == ViewData::CollapseDynamic )
+        {
+            rData.settings.stackCollapseClamp = depth;
+        }
+
+        ImGui::PopStyleColor( 4 );
+        ImGui::PopItemFlag();
+
+        if ( !isPopup )
+            ImGui::PopStyleVar(); //ImGuiStyleVar_FramePadding
+
+        if ( origSettings != rData.settings )
+        {
+            // We need to prevent scrolling for two frames, since the height of this item
+            // is only evaluated to the new height in the next Preprocess() step
+            rData.preventScroll = 2;
+        }
+    }
+
+    if ( isPopup )
+    {
+        ImGui::EndPopup();
+    }
+
+    ImGui::SetCursorPosY( offset );
+
+    if ( rData.settings != rVdTrackSettings.ui )
+    {
+        rVdTrackSettings.flags |= ViewData::Flags_Manual;
+        rVdTrackSettings.ui = rData.settings;
+        RequestSaveSettings();
+    }
+}
+
 
 }

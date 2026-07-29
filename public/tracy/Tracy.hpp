@@ -1,6 +1,50 @@
 #ifndef __TRACY_HPP__
 #define __TRACY_HPP__
 
+#if ( !defined ( TRACY_EXPORTS ) && !defined(IS_TIER0_PERPROJECT) && !defined (IS_TIER0_PERPROJECT_STATICLINK) )
+#define TRACY_IMPORTS 1
+#endif
+
+#ifdef _DEBUG
+
+#include <cmath>
+#include <algorithm>
+
+#ifdef floor
+#undef floor
+template<class T> T floor( T x, T y )
+{
+	return std::floor( x, y );
+}
+#endif
+
+#ifdef max
+#undef max
+template<class T> T max( T x, T y )
+{
+	return std::max( x, y );
+}
+#endif
+
+#ifdef min
+#undef min
+template<class T> T min( T x, T y )
+{
+	return std::min( x, y );
+}
+#endif
+
+#ifdef ceil
+#undef ceil
+template<class T> T ceil( T x )
+{
+	return std::ceil( x );
+}
+#endif
+
+#endif
+
+
 #include "../common/TracyColor.hpp"
 #include "../common/TracySystem.hpp"
 

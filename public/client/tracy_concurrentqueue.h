@@ -32,7 +32,6 @@
 
 #include "../common/TracyAlloc.hpp"
 #include "../common/TracyForceInline.hpp"
-#include "../common/TracySystem.hpp"
 
 #if defined(__GNUC__)
 // Disable -Wconversion warnings (spuriously triggered when Traits::size_t and
@@ -305,7 +304,7 @@ namespace details
 struct ProducerToken
 {
 	template<typename T, typename Traits>
-	explicit ProducerToken(ConcurrentQueue<T, Traits>& queue);
+	explicit ProducerToken(ConcurrentQueue<T, Traits>& queue, uint32_t threadId);
 
 	ProducerToken(ProducerToken&& other) noexcept
 		: producer(other.producer)
@@ -1399,12 +1398,12 @@ private:
 
 
 template<typename T, typename Traits>
-ProducerToken::ProducerToken(ConcurrentQueue<T, Traits>& queue)
+ProducerToken::ProducerToken(ConcurrentQueue<T, Traits>& queue, uint32_t threadId )
 	: producer(queue.recycle_or_create_producer())
 {
 	if (producer != nullptr) {
 		producer->token = this;
-        producer->threadId = detail::GetThreadHandleImpl();
+        producer->threadId = threadId;
 	}
 }
 

@@ -4,23 +4,24 @@
 #include <stdint.h>
 
 #include "../public/common/TracyForceInline.hpp"
+#include "TracyEvent.hpp"
 
 namespace tracy
 {
 
-static tracy_force_inline uint64_t GetThreadBit( uint8_t thread )
+static tracy_force_inline size_t GetThreadBit( uint8_t thread )
 {
-    return uint64_t( 1 ) << thread;
+    return thread;
 }
 
-static tracy_force_inline bool IsThreadWaiting( uint64_t bitlist, uint64_t threadBit )
+static tracy_force_inline bool IsThreadWaiting( ThreadWaitList bitlist, size_t threadBit )
 {
-    return ( bitlist & threadBit ) != 0;
+    return bitlist.Test( threadBit );
 }
 
-static tracy_force_inline bool AreOtherWaiting( uint64_t bitlist, uint64_t threadBit )
+static tracy_force_inline bool AreOtherWaiting( ThreadWaitList bitlist, size_t threadBit )
 {
-    return ( bitlist & ~threadBit ) != 0;
+    return bitlist.Reset(threadBit).Any();
 }
 
 }

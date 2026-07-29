@@ -1,4 +1,5 @@
 #include "TracyImGui.hpp"
+#include "TracyMouse.hpp"
 #include "TracyPrint.hpp"
 #include "TracyTimelineContext.hpp"
 #include "TracyTimelineItemCpuData.hpp"
@@ -9,8 +10,9 @@
 namespace tracy
 {
 
-TimelineItemCpuData::TimelineItemCpuData( View& view, Worker& worker, void* key )
-    : TimelineItem( view, worker, key, true )
+	TimelineItemCpuData::TimelineItemCpuData( View &view, Worker &worker, void *key )
+		: TimelineItem( view, worker, key, true )
+		, m_drawThreadInteractions( false )
 {
 }
 
@@ -22,6 +24,30 @@ void TimelineItemCpuData::SetVisible( bool visible )
 bool TimelineItemCpuData::IsVisible() const
 {
     return m_view.GetViewData().drawCpuData;
+}
+
+void TimelineItemCpuData::HeaderExtraContents( const TimelineContext &ctx, int offset, float &xOffset )
+{
+    auto draw = ImGui::GetWindowDrawList();
+    const auto ty = ImGui::GetTextLineHeight();
+    const float ItemSpacing = ImGui::GetStyle().ItemSpacing.x;
+
+    const auto color = m_drawThreadInteractions ? 0xFFAA9999 : 0x88AA7777;
+    draw->AddText( ctx.wpos + ImVec2( xOffset, offset ), color, ICON_FA_DIAGRAM_PREDECESSOR );
+    float iconSz = ImGui::CalcTextSize( ICON_FA_DIAGRAM_PREDECESSOR ).x;
+
+    if ( ctx.hover && ImGui::IsMouseHoveringRect( ctx.wpos + ImVec2( xOffset, offset ), ctx.wpos + ImVec2( xOffset + iconSz, offset + ty ) ) )
+    {
+        ImGui::BeginTooltip();
+        TextDisabledUnformatted( ( m_drawThreadInteractions ? "Hide thread interactions" : "Show thread interactions" ) );
+        ImGui::EndTooltip();
+
+        if ( IsMouseClicked( 0 ) )
+        {
+            m_drawThreadInteractions = !m_drawThreadInteractions;
+        }
+    }
+    xOffset += iconSz + ItemSpacing;
 }
 
 bool TimelineItemCpuData::IsEmpty() const
@@ -41,7 +67,7 @@ int64_t TimelineItemCpuData::RangeEnd() const
 
 bool TimelineItemCpuData::DrawContents( const TimelineContext& ctx, int& offset )
 {
-    m_view.DrawCpuData( ctx, m_cpuDraw, m_ctxDraw, offset, m_hasCpuData );
+    m_view.DrawCpuData( ctx, m_cpuDraw, m_ctxDraw, offset, m_hasCpuData, m_drawThreadInteractions );
     return true;
 }
 
@@ -195,7 +221,7 @@ void TimelineItemCpuData::PreprocessCpuUsage( const TimelineContext& ctx )
             }
             else
             {
-                const auto test = ( time << 16 ) | 0xFFFF;
+                const uint64_t test = ( time << 16 ) | 0xFFFF;
                 auto it = std::upper_bound( itBegin, ctxUsage.end(), test, [] ( const auto& l, const auto& r ) { return l < r._time_other_own; } );
                 if( it == ctxUsage.end() ) return;
                 if( it == ctxUsage.begin() )

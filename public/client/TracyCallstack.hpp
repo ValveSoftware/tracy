@@ -5,6 +5,13 @@
 #include "../common/TracyForceInline.hpp"
 #include "TracyCallstack.h"
 
+
+namespace tracy
+{
+typedef void* (DbgHelpLoaderFunc)();
+}
+
+
 #ifndef TRACY_HAS_CALLSTACK
 
 namespace tracy
@@ -68,10 +75,11 @@ struct CallstackEntryData
 CallstackSymbolData DecodeSymbolAddress( uint64_t ptr );
 const char* DecodeCallstackPtrFast( uint64_t ptr );
 CallstackEntryData DecodeCallstackPtr( uint64_t ptr );
-void InitCallstack();
+void InitCallstack( DbgHelpLoaderFunc* pDbgHelpLoader );
 void InitCallstackCritical();
 void EndCallstack();
 const char* GetKernelModulePath( uint64_t addr );
+const void* GetKernelCode( uint64_t addr, uint64_t size );
 
 #ifdef TRACY_DEBUGINFOD
 const uint8_t* GetBuildIdForImage( const char* image, size_t& size );

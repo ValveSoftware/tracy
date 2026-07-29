@@ -16,7 +16,7 @@ set(TRACY_VERSION_MAJOR ${CMAKE_MATCH_1})
 string(REGEX MATCH "Minor = ([0-9]+)" _ ${version})
 set(TRACY_VERSION_MINOR ${CMAKE_MATCH_1})
 
-string(REGEX MATCH "Patch = ([0-9]+)" _ ${version})
+string(REGEX MATCH "Patch = ForceFileVersionPatchConflict[ \\t]+\\+[ \\t]+([0-9]+)" _ ${version})
 set(TRACY_VERSION_PATCH ${CMAKE_MATCH_1})
 
 set(TRACY_VERSION_STRING "${TRACY_VERSION_MAJOR}.${TRACY_VERSION_MINOR}.${TRACY_VERSION_PATCH}")

@@ -21,6 +21,7 @@ protected:
     uint32_t HeaderColorInactive() const override { return 0xFF6E446E; }
     uint32_t HeaderLineColor() const override { return 0x66DD88DD; }
     const char* HeaderLabel() const override { return "CPU data"; }
+    void HeaderExtraContents( const TimelineContext &ctx, int offset, float &xOffset ) override;
 
     int64_t RangeBegin() const override;
     int64_t RangeEnd() const override;
@@ -39,7 +40,8 @@ private:
     std::vector<CpuUsageDraw> m_cpuDraw;
     std::vector<std::vector<CpuCtxDraw>> m_ctxDraw;
 
-    bool m_hasCpuData;
+    bool m_hasCpuData = false;
+    bool m_drawThreadInteractions = false;
 };
 
 }

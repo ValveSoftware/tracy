@@ -2,10 +2,13 @@
 #define __TRACYEVENT_HPP__
 
 #include <assert.h>
+#include <array>
 #include <limits>
 #include <stdint.h>
 #include <string>
 #include <string.h>
+#include <bitset>
+#include <memory_resource>
 
 #include "TracyCharUtil.hpp"
 #include "TracyShortPtr.hpp"
@@ -17,6 +20,94 @@
 
 namespace tracy
 {
+
+
+enum { MaxLockThreads = (std::numeric_limits<uint8_t>::max() + 1) };
+
+template< size_t N >
+struct BitList
+{
+    static const size_t MaxBits = N;
+
+    void Clear()
+    {
+        v.reset();
+    }
+
+    bool operator==( const BitList &rhs ) const
+    {
+        return v == rhs.v;
+    }
+
+    bool operator!=( const BitList &rhs ) const
+    {
+        return !(v == rhs.v);
+    }
+
+    inline BitList& Set( size_t bitIndex )
+    {
+        v.set( bitIndex );
+        return *this;
+    }
+
+    inline BitList& Reset( size_t bitIndex )
+    {
+        v.reset( bitIndex );
+        return *this;
+    }
+
+    inline BitList &operator>>=( uint64_t amount )
+    {
+        v >>= amount;
+        return *this;
+    }
+
+    inline BitList UnionWith( BitList rhs )
+    {
+        BitList result = *this;
+        v |= rhs.v;
+        return result;
+    }
+
+    inline bool Test( size_t bitIndex ) const
+    {
+        return v.test( bitIndex );
+    }
+
+    inline size_t Count() const
+    {
+        return v.count();
+    }
+
+    inline bool None() const
+    {
+        return v.none();
+    }
+
+    inline bool Any() const
+    {
+        return v.any();
+    }
+
+    inline bool All() const
+    {
+        return v.all();
+    }
+
+    std::bitset<N> v;
+};
+
+
+template < size_t N >
+inline BitList<N> BitListUnion( BitList<N> lhs, BitList<N> rhs )
+{
+    BitList<N> result = lhs.UnionWith( rhs );
+    return result;
+}
+
+typedef BitList<MaxLockThreads> ThreadWaitList;
+typedef BitList<MaxLockThreads> ThreadLockList;
+
 
 #pragma pack( push, 1 )
 
@@ -310,6 +401,22 @@ struct HwSampleData
 
 enum { HwSampleDataSize = sizeof( HwSampleData ) };
 
+struct HwCounterData
+{
+    Int48 time;
+    uint64_t count;
+};
+
+enum { HwCounterDataSize = sizeof( HwCounterData ) };
+
+struct HwCounterConfig
+{
+    StringIdx name;
+    StringIdx description;
+};
+
+enum { HwCounterConfigSize = sizeof( HwCounterConfig ) };
+
 
 struct LockEvent
 {
@@ -335,8 +442,8 @@ struct LockEvent
 
 struct LockEventShared : public LockEvent
 {
-    uint64_t waitShared;
-    uint64_t sharedList;
+    ThreadWaitList waitShared;
+    ThreadWaitList sharedList;
 };
 
 struct LockEventPtr
@@ -344,40 +451,43 @@ struct LockEventPtr
     short_ptr<LockEvent> ptr;
     uint8_t lockingThread;
     uint8_t lockCount;
-    uint64_t waitList;
+    ThreadWaitList waitList;
 };
 
 enum { LockEventSize = sizeof( LockEvent ) };
 enum { LockEventSharedSize = sizeof( LockEventShared ) };
 enum { LockEventPtrSize = sizeof( LockEventPtr ) };
 
-enum { MaxLockThreads = sizeof( LockEventPtr::waitList ) * 8 };
-static_assert( std::numeric_limits<decltype(LockEventPtr::lockCount)>::max() >= MaxLockThreads, "Not enough space for lock count." );
+static_assert( MaxLockThreads == (std::numeric_limits<decltype(LockEventPtr::lockingThread)>::max() + 1), "Not enough space for locking threads." );
 
 
 enum class LockType : uint8_t;
 
+struct LockTimeRange
+{
+    int64_t start = std::numeric_limits<int64_t>::max();
+    int64_t end = std::numeric_limits<int64_t>::min();
+};
+
+
 struct LockMap
 {
-    struct TimeRange
-    {
-        int64_t start = std::numeric_limits<int64_t>::max();
-        int64_t end = std::numeric_limits<int64_t>::min();
-    };
-
     StringIdx customName;
-    int16_t srcloc;
+    int16_t srcloc = 0;
     Vector<LockEventPtr> timeline;
     unordered_flat_map<uint64_t, uint8_t> threadMap;
     std::vector<uint64_t> threadList;
-    LockType type;
-    int64_t timeAnnounce;
-    int64_t timeTerminate;
-    bool valid;
-    bool isContended;
-    uint64_t lockingThread;
+    LockType type = LockType::Lockable;
+    int64_t timeAnnounce = 0;
+    int64_t timeTerminate = 0;
+    bool valid = false;
+    bool isContended = false;
+    bool isMultiThread = false;
+    bool isTerminated = false;
+    uint32_t lockCount = 0;
+    uint64_t lockingThread = 0;
 
-    TimeRange range[64];
+    std::array<LockTimeRange, MaxLockThreads> range;
 };
 
 struct LockHighlight
@@ -614,7 +724,7 @@ struct ContextSwitchData
     Int48 _end;
     int8_t _reason;
     int8_t _state;
-    
+
     Int48 _wakeup;
     uint16_t _thread; // currently unused ? Could store next thread or prios here.
 };
@@ -634,8 +744,15 @@ struct ContextSwitchCpu
 
     tracy_force_inline void SetStartThread( int64_t start, uint16_t thread ) { assert( start < (int64_t)( 1ull << 47 ) ); _start_thread = ( uint64_t( start ) << 16 ) | thread; }
 
+	tracy_force_inline int64_t WakeupVal() const { return _wakeup.Val(); }
+	tracy_force_inline void SetWakeup( int64_t wakeup ) { assert( wakeup < ( int64_t ) ( 1ull << 47 ) ); _wakeup.SetVal( wakeup ); }
+	tracy_force_inline uint8_t WakeupCpu() const { return _wakeupCpu; }
+	tracy_force_inline void SetWakeupCpu( uint8_t wakeupCpu ) { _wakeupCpu = wakeupCpu; }
+
     uint64_t _start_thread;
     Int48 _end;
+	uint8_t _wakeupCpu;
+	Int48 _wakeup;
 };
 
 enum { ContextSwitchCpuSize = sizeof( ContextSwitchCpu ) };
@@ -746,6 +863,9 @@ struct ThreadData
     ThreadData* fiber;
     uint8_t* stackCount;
     int32_t groupHint;
+    uint32_t nSort;
+    int32_t maxDepth;
+
 
     tracy_force_inline void IncStackCount( int16_t srcloc ) { stackCount[uint16_t(srcloc)]++; }
     tracy_force_inline bool DecStackCount( int16_t srcloc ) { return --stackCount[uint16_t(srcloc)] != 0; }
@@ -755,6 +875,7 @@ struct GpuCtxThreadData
 {
     Vector<short_ptr<GpuEvent>> timeline;
     Vector<short_ptr<GpuEvent>> stack;
+    int32_t maxDepth;
 };
 
 struct GpuCtxData
@@ -785,7 +906,8 @@ enum class PlotType : uint8_t
     User,
     Memory,
     SysTime,
-    Power
+    Power,
+    Zone
 };
 
 // Keep this in sync with enum in TracyC.h
@@ -797,22 +919,50 @@ enum class PlotValueFormatting : uint8_t
     Watt
 };
 
+enum class PlotDrawType : uint8_t
+{
+	Line,	// backward compatible with deleted 'PlotData::showSteps' -> 0
+	Step,	// backward compatible with deleted 'PlotData::showSteps' -> 1
+	Bar
+};
+
+enum class PlotFilterType : uint8_t
+{
+	NoFilter = 0,
+	Thread,
+	ZoneName,
+	Parent,
+	Callstack,
+	UserText
+};
+
+// ZonePlotDef records all details needed to recreate a zone plot
+struct ZonePlotDef
+{
+    int16_t srcloc;
+	PlotFilterType filterType;
+	uint64_t filterId;
+    bool aggregatePerFrame;
+};
+
 struct PlotData
 {
     struct PlotItemSort { bool operator()( const PlotItem& lhs, const PlotItem& rhs ) const { return lhs.time.Val() < rhs.time.Val(); }; };
 
-    uint64_t name;
+    StringRef name;
     double min;
     double max;
     double sum;
     SortedVector<PlotItem, PlotItemSort> data;
     PlotType type;
     PlotValueFormatting format;
-    uint8_t showSteps;
+	PlotDrawType drawType;
     uint8_t fill;
     uint32_t color;
 
     double rMin, rMax, num;
+    PlotData *nextPlot = nullptr; // Linked list of plots to draw on same chart
+    ZonePlotDef *zonePlotDef = nullptr;
 };
 
 struct MemData
@@ -876,6 +1026,8 @@ struct ContextSwitch
 struct CpuData
 {
     Vector<ContextSwitchCpu> cs;
+    // TODO Do we need to use a SortedVector ???
+    Vector<HwCounterData> hwCounter;
 };
 
 struct CpuThreadData

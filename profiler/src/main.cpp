@@ -70,6 +70,7 @@
 
 #include "GitRef.hpp"
 
+#include "GetMainWindowHandle.h"
 
 struct ClientData
 {
@@ -80,6 +81,9 @@ struct ClientData
     uint64_t pid;
     std::string procName;
     std::string address;
+
+    std::string message;
+    bool denyConnection;
 };
 
 enum class ViewShutdown { False, True, Join };
@@ -221,6 +225,7 @@ static void LoadConfig()
     if( ini_sget( ini, "core", "threadedRendering", "%d", &v ) ) s_config.threadedRendering = v;
     if( ini_sget( ini, "core", "focusLostLimit", "%d", &v ) ) s_config.focusLostLimit = v;
     if( ini_sget( ini, "timeline", "targetFps", "%d", &v ) && v >= 1 && v < 10000 ) s_config.targetFps = v;
+    if( ini_sget( ini, "locks", "keepSingleThreadLocks", "%d", &v ) ) s_config.keepSingleThreadLocks = v;
     if( ini_sget( ini, "timeline", "dynamicColors", "%d", &v ) ) s_config.dynamicColors = v;
     if( ini_sget( ini, "timeline", "forceColors", "%d", &v ) ) s_config.forceColors = v;
     if( ini_sget( ini, "timeline", "shortenName", "%d", &v ) ) s_config.shortenName = v;
@@ -233,6 +238,7 @@ static void LoadConfig()
     if( ini_sget( ini, "ui", "saveUserScale", "%d", &v ) ) s_config.saveUserScale = v;
     if( ini_sget( ini, "ui", "userScale", "%lf", &v1 ) && v1 > 0.0 && s_config.saveUserScale ) s_config.userScale = v1;
     
+
 
     ini_free( ini );
 }
@@ -267,6 +273,9 @@ static bool SaveConfig()
     fprintf( f, "saveUserScale = %i\n", (int)s_config.saveUserScale );
     fprintf( f, "userScale = %lf\n", s_config.userScale );
 
+    fprintf( f, "\n[locks]\n" );
+    fprintf( f, "keepSingleThreadLocks = %i\n", (int)s_config.keepSingleThreadLocks );
+
     fclose( f );
     return true;
 }
@@ -280,8 +289,8 @@ static void SetupScaleCallback( float scale )
 
 static void ScaleChanged( float scale )
 {
-    if( dpiScaleOverriddenFromEnv ) return;
-    if( dpiScale == scale ) return;
+    if ( dpiScaleOverriddenFromEnv ) return;
+    if ( dpiScale == scale ) return;
 
     dpiScale = scale;
     SetupDPIScale();
@@ -363,6 +372,8 @@ int main( int argc, char** argv )
     s_achievements = &achievements;
 
 #ifndef __EMSCRIPTEN__
+    if ( false ) // config check for new versions
+    {
     updateThread = std::thread( [] {
         HttpRequest( "nereid.pl", "/tracy/version", 8099, [] ( int size, char* data ) {
             if( size == 4 )
@@ -374,6 +385,7 @@ int main( int argc, char** argv )
             delete[] data;
         } );
     } );
+    }
 #endif
 
     auto iconThread = std::thread( [] {
@@ -471,16 +483,40 @@ static void UpdateBroadcastClients()
                 if( broadcastVersion <= tracy::BroadcastVersion )
                 {
                     uint32_t protoVer;
-                    char procname[tracy::WelcomeMessageProgramNameSize];
+                    char procname[tracy::WelcomeMessageProgramNameSize + 1] = {0};
+                    char message[tracy::ProfilerMessageSize + 1] = {0};
+                    bool denyConnection = false;
                     int32_t activeTime;
                     uint16_t listenPort;
                     uint64_t pid;
 
                     switch( broadcastVersion )
                     {
-                    case 3:
+                    case 4:
                     {
                         tracy::BroadcastMessage bm;
+                        memcpy( &bm, msg, len );
+                        protoVer = bm.protocolVersion;
+                        size_t nameCopyLen = std::min<size_t>( bm.nameLen, tracy::WelcomeMessageProgramNameSize );
+                        size_t msgCopyLen = std::min<size_t>( bm.msgLen, tracy::ProfilerMessageSize );
+                        size_t copyOffset = 0;
+                        memcpy( procname, bm.strBuffer + copyOffset, nameCopyLen );
+                        procname[ nameCopyLen ] = 0;
+                        copyOffset += nameCopyLen;
+                        memcpy( message, bm.strBuffer + copyOffset, msgCopyLen );
+                        message[ msgCopyLen ] = 0;
+                        copyOffset += nameCopyLen;
+
+                        activeTime = bm.activeTime;
+                        listenPort = bm.listenPort;
+                        pid = bm.pid;
+                        denyConnection = (bm.flags & tracy::BroadcastFlags_DenyConnection);
+                        break;
+                    }
+                    case 3:
+                    {
+                        if( len > sizeof( tracy::BroadcastMessage_v3 ) ) continue;
+                        tracy::BroadcastMessage_v3 bm;
                         memcpy( &bm, msg, len );
                         protoVer = bm.protocolVersion;
                         strcpy( procname, bm.programName );
@@ -551,7 +587,7 @@ static void UpdateBroadcastClients()
                                     } );
                             }
                             resolvLock.unlock();
-                            clients.emplace( clientId, ClientData { time, protoVer, activeTime, listenPort, pid, procname, std::move( ip ) } );
+                            clients.emplace( clientId, ClientData { time, protoVer, activeTime, listenPort, pid, procname, std::move( ip ), message, denyConnection } );
                         }
                         else
                         {
@@ -560,7 +596,9 @@ static void UpdateBroadcastClients()
                             it->second.port = listenPort;
                             it->second.pid = pid;
                             it->second.protocolVersion = protoVer;
+                            it->second.denyConnection = denyConnection;
                             if( strcmp( it->second.procName.c_str(), procname ) != 0 ) it->second.procName = procname;
+                            if( strcmp( it->second.message.c_str(), message ) != 0 ) it->second.message = message;
                         }
                     }
                     else if( it != clients.end() )
@@ -650,7 +688,17 @@ static void DrawContents()
 #endif
 
     int display_w, display_h;
-    bptr->NewFrame( display_w, display_h );
+    //bptr->NewFrame( display_w, display_h );
+    //
+    // If we call bptr->NewFrame( display_w, display_h ); we need to call ImGui::NewFrame(), otherwise the ImGui delta time calculation is wrong.
+    // 
+    // bptr->NewFrame(), or rather ImGui_ImplGlfw_NewFrame(), directly *sets* ImGui::IO::DeltaTime,
+    // If we do not run ImGui::NewFrame() for each time we run bptr->NewFrame() we lose time information.
+    // This is a problem for timed input like double click.
+    //
+    // Moving to after the early out... seems to work but needs testing.
+    // Also, we cannot call ImGui::NewFrame() here instead, because that requires EndFrame() to be called, through Render(),
+    // however we want to avoid calling ImGui::Render() if we intend to sleep this frame.
 
     const bool achievementsAttention = s_config.achievements ? s_achievements->NeedsAttention() : false;
 
@@ -689,6 +737,7 @@ static void DrawContents()
     }
     activeFrames--;
 
+    bptr->NewFrame( display_w, display_h );
     ImGui::NewFrame();
     tracy::MouseFrame();
 
@@ -847,6 +896,15 @@ static void DrawContents()
                 ImGui::Spacing();
                 if( ImGui::Checkbox( "Enable achievements", &s_config.achievements ) ) SaveConfig();
                 if( ImGui::Checkbox( "Save UI scale", &s_config.saveUserScale) ) SaveConfig();
+
+                ImGui::TextUnformatted( "Keep terminated single thread locks" );
+                const char *cblabels[] = { "no", "yes" };
+                ImGui::Indent();
+                if( ImGui::Checkbox( cblabels[s_config.keepSingleThreadLocks], &s_config.keepSingleThreadLocks) )
+                {
+                    SaveConfig();
+                }
+                ImGui::Unindent();
 
                 ImGui::PopStyleVar();
                 ImGui::TreePop();
@@ -1142,8 +1200,19 @@ static void DrawContents()
                 if( filt->FailProg( v.second.procName.c_str() ) ) continue;
                 ImGuiSelectableFlags flags = ImGuiSelectableFlags_SpanAllColumns;
                 if( badProto ) flags |= ImGuiSelectableFlags_Disabled;
+                if ( v.second.denyConnection ) flags |= ImGuiSelectableFlags_Disabled;
                 ImGui::PushID( idx++ );
+
+                int pushedStyles = 0;
+                if ( v.second.denyConnection )
+                {
+                    ImGui::PushStyleColor( ImGuiCol_Text, 0xff5555ff ); pushedStyles++;
+                }
                 const bool selected = ImGui::Selectable( name->second.c_str(), &sel, flags );
+                if ( v.second.denyConnection )
+                {
+                    ImGui::PopStyleColor(  pushedStyles );
+                }
                 ImGui::PopID();
                 if( ImGui::IsItemHovered( ImGuiHoveredFlags_AllowWhenDisabled ) )
                 {
@@ -1170,12 +1239,24 @@ static void DrawContents()
                         }
                         ImGui::Separator();
                     }
+                    if ( v.second.denyConnection )
+                    {
+                        tracy::TextColoredUnformatted( 0xFF4444FF, "Not accepting connections." );
+                    }
+                    if ( !v.second.message.empty() )
+                    {
+                        tracy::TextColoredUnformatted( 0xFF00E1E1, v.second.message.c_str() );
+                    }
                     tracy::TextFocused( "IP:", v.second.address.c_str() );
                     tracy::TextFocused( "Port:", portstr );
                     if( v.second.pid != 0 )
                     {
                         tracy::TextFocused( "PID:", tracy::RealToString( v.second.pid ) );
                     }
+					if ( v.second.procName.ends_with( "FeeFee" ) )
+					{
+						tracy::TextColoredUnformatted( 0xFF5050FF, "Using InitializeToFeeFee for Memory initialization (likely connected to debugger, or a debug build). This will distort profiling results." );
+					}
                     ImGui::EndTooltip();
                 }
                 if( v.second.port != port )

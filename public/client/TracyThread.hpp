@@ -7,6 +7,8 @@
 #  include <pthread.h>
 #endif
 
+#include <atomic>
+
 #ifdef TRACY_MANUAL_LIFETIME
 #  include "tracy_rpmalloc.hpp"
 #endif
@@ -36,7 +38,8 @@ class Thread
 {
 public:
     Thread( void(*func)( void* ptr ), void* ptr )
-        : m_func( func )
+        : m_isRunning( false )
+        , m_func( func )
         , m_ptr( ptr )
         , m_hnd( CreateThread( nullptr, 0, Launch, this, 0, nullptr ) )
     {}
@@ -49,9 +52,22 @@ public:
 
     HANDLE Handle() const { return m_hnd; }
 
-private:
-    static DWORD WINAPI Launch( void* ptr ) { ((Thread*)ptr)->m_func( ((Thread*)ptr)->m_ptr ); return 0; }
+    bool IsRunning() const
+    {
+        return m_isRunning.load();
+    }
 
+private:
+    static DWORD WINAPI Launch( void* ptr )
+    {
+        Thread *pThread = ( Thread * ) ptr;
+        pThread->m_isRunning.store( true );
+        pThread->m_func( ((Thread*)ptr)->m_ptr );
+        pThread->m_isRunning.store( false );
+        return 0;
+    }
+
+    std::atomic<bool> m_isRunning;
     void(*m_func)( void* ptr );
     void* m_ptr;
     HANDLE m_hnd;
@@ -63,7 +79,8 @@ class Thread
 {
 public:
     Thread( void(*func)( void* ptr ), void* ptr )
-        : m_func( func )
+        : m_isRunning( false )
+        , m_func( func )
         , m_ptr( ptr )
     {
         pthread_create( &m_thread, nullptr, Launch, this );
@@ -76,8 +93,22 @@ public:
 
     pthread_t Handle() const { return m_thread; }
 
+    bool IsRunning() const
+    {
+        return m_isRunning.load();
+    }
+
 private:
-    static void* Launch( void* ptr ) { ((Thread*)ptr)->m_func( ((Thread*)ptr)->m_ptr ); return nullptr; }
+    static void* Launch( void* ptr )
+    {
+        Thread *pThread = ( Thread * ) ptr;
+        pThread->m_isRunning.store( true );
+        pThread->m_func( ((Thread*)ptr)->m_ptr );
+        pThread->m_isRunning.store( false );
+        return nullptr;
+    }
+
+    std::atomic<bool> m_isRunning;
     void(*m_func)( void* ptr );
     void* m_ptr;
     pthread_t m_thread;

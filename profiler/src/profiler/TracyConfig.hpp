@@ -16,10 +16,11 @@ struct Config
     bool memoryLimit = false;
     int memoryLimitPercent = 80;
     bool achievements = false;
-    bool achievementsAsked = false;
+    bool achievementsAsked = true;
     int dynamicColors = 1;
     bool forceColors = false;
     int shortenName = (int)ShortenName::NoSpaceAndNormalize;
+    bool keepSingleThreadLocks = false;
     bool saveUserScale = false;
     float userScale = 1.0f;
 };

@@ -14,6 +14,7 @@
 #include "imgui.h"
 
 #include "TracyFileRead.hpp"
+#include "TracyFileselector.hpp"
 #include "TracyFilesystem.hpp"
 #include "TracyImGui.hpp"
 #include "TracyPrint.hpp"
@@ -36,12 +37,17 @@ namespace tracy
 double s_time = 0;
 
 View::View( void(*cbMainThread)(const std::function<void()>&, bool), const char* addr, uint16_t port, ImFont* fixedWidth, ImFont* smallFont, ImFont* bigFont, SetTitleCallback stcb, SetScaleCallback sscb, AttentionCallback acb, const Config& config, AchievementsMgr* amgr )
-    : m_worker( addr, port, config.memoryLimit == 0 ? -1 : ( config.memoryLimitPercent * tracy::GetPhysicalMemorySize() / 100 ) )
+    : m_worker( addr, port, config.memoryLimit == 0 ? -1 : ( config.memoryLimitPercent * tracy::GetPhysicalMemorySize() / 100 ), config.keepSingleThreadLocks )
     , m_staticView( false )
     , m_viewMode( ViewMode::LastFrames )
     , m_viewModeHeuristicTry( true )
     , m_totalMemory( GetPhysicalMemorySize() )
     , m_forceConnectionPopup( true, true )
+    , m_timeAtMouse( -1 )
+    , m_nsPerPixel( 0 )
+    , m_requestSaveSettings( false )
+    , m_requestSaveZonePlots( false )
+    , m_requestLoadZonePlots( false )
     , m_tc( *this, m_worker, config.threadedRendering )
     , m_frames( nullptr )
     , m_messagesScrollBottom( true )
@@ -65,7 +71,17 @@ View::View( void(*cbMainThread)(const std::function<void()>&, bool), const char*
 #endif
 {
     InitTextEditor();
-    SetupConfig( config );
+
+    m_userData.LoadStateJson( m_vd );
+	SetupConfig( config );
+    m_vd.frameTarget = config.targetFps;
+    m_vd.keepSingleThreadLocks = config.keepSingleThreadLocks;
+    if ( !m_vd.keepSingleThreadLocks )
+    {
+        m_vd.lockDrawFlags &= ~( ViewData::ELockDrawVisFlags::SingleThread );
+    }
+
+    InitResizeBar();
 }
 
 View::View( void(*cbMainThread)(const std::function<void()>&, bool), FileRead& f, ImFont* fixedWidth, ImFont* smallFont, ImFont* bigFont, SetTitleCallback stcb, SetScaleCallback sscb, AttentionCallback acb, const Config& config, AchievementsMgr* amgr )
@@ -73,7 +89,10 @@ View::View( void(*cbMainThread)(const std::function<void()>&, bool), FileRead& f
     , m_filename( f.GetFilename() )
     , m_staticView( true )
     , m_viewMode( ViewMode::Paused )
-    , m_totalMemory( GetPhysicalMemorySize() )
+	, m_totalMemory( GetPhysicalMemorySize() )
+    , m_timeAtMouse( -1 )
+    , m_nsPerPixel( 0 )
+    , m_requestSaveSettings( false )
     , m_tc( *this, m_worker, config.threadedRendering )
     , m_frames( m_worker.GetFramesBase() )
     , m_messagesScrollBottom( false )
@@ -99,28 +118,45 @@ View::View( void(*cbMainThread)(const std::function<void()>&, bool), FileRead& f
     m_notificationText = std::string( "Trace loaded in " ) + TimeToString( m_worker.GetLoadTime() );
 
     InitTextEditor();
-    SetupConfig( config );
+	SetupConfig( config );
 
     m_vd.zvStart = m_worker.GetFirstTime();
     m_vd.zvEnd = m_worker.GetLastTime();
     m_userData.StateShouldBePreserved();
     m_userData.LoadState( m_vd );
+    m_userData.LoadStateJson( m_vd );
     m_userData.LoadAnnotations( m_annotations );
+    m_requestLoadZonePlots = true;
+
     m_sourceRegexValid = m_userData.LoadSourceSubstitutions( m_sourceSubstitutions );
 
     if( m_worker.GetCallstackFrameCount() == 0 ) m_showUnknownFrames = false;
     if( m_worker.GetCallstackSampleCount() == 0 ) m_showAllSymbols = true;
+
+    m_vd.frameTarget = config.targetFps;
+
+    m_vd.keepSingleThreadLocks = config.keepSingleThreadLocks;
+    if ( !m_vd.keepSingleThreadLocks )
+    {
+        m_vd.lockDrawFlags &= ~( ViewData::ELockDrawVisFlags::SingleThread );
+    }
+
+    InitResizeBar();
 
     Achieve( "loadTrace" );
 }
 
 View::~View()
 {
+    const bool saveGlobalSettings = !m_worker.IsDataStatic();
+
     m_worker.Shutdown();
 
     m_userData.SaveState( m_vd );
+    m_userData.SaveStateJson( m_vd, saveGlobalSettings );
     m_userData.SaveAnnotations( m_annotations );
     m_userData.SaveSourceSubstitutions( m_sourceSubstitutions );
+    m_userData.SaveZonePlotsJson( m_worker, m_worker.GetPlots() );
 
     if( m_compare.loadThread.joinable() ) m_compare.loadThread.join();
     if( m_saveThread.joinable() ) m_saveThread.join();
@@ -128,6 +164,17 @@ View::~View()
     if( m_frameTexture ) FreeTexture( m_frameTexture, m_cbMainThread );
     if( m_playback.texture ) FreeTexture( m_playback.texture, m_cbMainThread );
 }
+
+void View::RequestSaveSettings()
+{
+    m_requestSaveSettings = true;
+}
+
+void View::RequestSaveZonePlots()
+{
+    m_requestSaveZonePlots = true;
+}
+
 
 void View::InitTextEditor()
 {
@@ -148,6 +195,22 @@ void View::Achieve( const char* id )
     if( !m_achievements || !m_achievementsMgr ) return;
     m_achievementsMgr->Achieve( id );
 }
+
+void View::InitResizeBar()
+{
+    m_framesResize.id = 0;
+    m_framesResize.wasActive = false;
+    m_framesResize.thickness = 8.0f;
+    m_framesResize.defaultHeight = MIN_FRAMES_HEIGHT;
+    m_framesResize.minHeight = m_framesResize.defaultHeight;
+    m_framesResize.maxHeight = MAX_FRAMES_HEIGHT;
+    m_framesResize.height = std::clamp( m_vd.flFrameHeight, m_framesResize.minHeight, m_framesResize.maxHeight );
+    m_framesResize.uiHeight = 0.0f;
+    m_framesResize.color = ImVec4( 0.5f, 0.5f, 0.5f, 1.0f );
+    m_framesResize.colActive = ImVec4( 0.9f, 1.0f, 0.9f, 1.0f );
+    m_framesResize.colHover = ImVec4( 0.8f, 0.8f, 0.8f, 1.0f );
+}
+
 
 void View::ViewSource( const char* fileName, int line )
 {
@@ -577,7 +640,21 @@ bool View::Draw()
     bool saveFailed = false;
     if( !m_filenameStaging.empty() )
     {
-        ImGui::OpenPopup( "Save trace" );
+        if ( m_exportRange.active )
+        {
+            auto fn = m_filenameStaging.c_str();
+            static FileCompression comp = FileCompression::Zstd;
+            static int zlvl = 3;
+            static bool buildDict = false;
+            static int streams = 4;
+            saveFailed = !Save( fn, comp, zlvl, buildDict, streams, m_exportRange );
+            m_exportRange = RangeSlim{ 0 };
+            m_filenameStaging.clear();
+        }
+        else
+        {
+            ImGui::OpenPopup( "Save trace" );
+        }
     }
     if( ImGui::BeginPopupModal( "Save trace", nullptr, ImGuiWindowFlags_AlwaysAutoResize ) )
     {
@@ -631,7 +708,8 @@ bool View::Draw()
         ImGui::Separator();
         if( ImGui::Button( ICON_FA_FLOPPY_DISK " Save trace" ) )
         {
-            saveFailed = !Save( fn, comp, zlvl, buildDict, streams );
+            m_exportRange.active = false;
+            saveFailed = !Save( fn, comp, zlvl, buildDict, streams, m_exportRange );
             m_filenameStaging.clear();
             ImGui::CloseCurrentPopup();
             Achieve( "saveTrace" );
@@ -747,7 +825,7 @@ bool View::DrawImpl()
     const auto& io = ImGui::GetIO();
     m_wasActive = false;
 
-    assert( m_shortcut == ShortcutAction::None );
+    //assert( m_shortcut == ShortcutAction::None );
     if( io.KeyCtrl )
     {
         if( ImGui::IsKeyPressed( ImGuiKey_F ) )
@@ -834,6 +912,28 @@ bool View::DrawImpl()
     }
     std::lock_guard<std::mutex> lock( m_worker.GetDataLock() );
     m_worker.DoPostponedWork();
+
+    SyncViewSettings( m_vd, m_worker );
+    if ( m_requestSaveSettings )
+    {
+        m_requestSaveSettings = false;
+        m_userData.SaveStateJson( m_vd, !m_worker.IsDataStatic() );
+    }
+
+#ifndef TRACY_NO_STATISTICS
+    if ( m_requestSaveZonePlots )
+    {
+        m_requestSaveZonePlots = false;
+        m_userData.SaveZonePlotsJson( m_worker, m_worker.GetPlots() );
+    }
+
+    if ( m_requestLoadZonePlots && m_worker.AreSourceLocationZonesReady() )
+    {
+        m_requestLoadZonePlots = false;
+        m_userData.LoadZonePlotsJson( m_worker );
+    }
+#endif
+
     if( !m_worker.IsDataStatic() )
     {
         if( m_worker.IsConnected() )
@@ -911,6 +1011,19 @@ bool View::DrawImpl()
     ToggleButton( ICON_FA_SCALE_BALANCED " Compare", m_compare.show );
     ImGui::SameLine();
     ToggleButton( ICON_FA_FINGERPRINT " Info", m_showInfo );
+    if( m_worker.HasContextSwitches() )
+    {
+        ImGui::SameLine();
+        ToggleButton( ICON_FA_MICROCHIP " Core View", m_showCoreView );
+        if ( m_showCoreView )
+        {
+            ImGui::SetItemTooltip( "Click to switch to Threads View" );
+        }
+        else
+        {
+            ImGui::SetItemTooltip( "Click to switch to Core View" );
+        }
+    }
     ImGui::SameLine();
     if( ImGui::Button( ICON_FA_SCREWDRIVER_WRENCH ) ) ImGui::OpenPopup( "ToolsPopup" );
     if( ImGui::BeginPopup( "ToolsPopup" ) )
@@ -927,7 +1040,11 @@ bool View::DrawImpl()
         }
         ToggleButton( ICON_FA_NOTE_STICKY " Annotations", m_showAnnotationList );
         ToggleButton( ICON_FA_RULER " Limits", m_showRanges );
+#ifndef TRACY_NO_STATISTICS
         const auto cscnt = m_worker.GetContextSwitchSampleCount();
+#else
+        const auto cscnt = 0;
+#endif
         if( ButtonDisablable( ICON_FA_HOURGLASS_HALF " Wait stacks", cscnt == 0 ) )
         {
             m_showWaitStacks = true;
@@ -1160,6 +1277,47 @@ bool View::DrawImpl()
     {
         const auto s = std::min( m_setRangePopup.min, m_setRangePopup.max );
         const auto e = std::max( m_setRangePopup.min, m_setRangePopup.max );
+		if ( m_setRangePopup.pZone )
+		{
+			if ( m_worker.HasZoneExtra( *m_setRangePopup.pZone ) && m_worker.GetZoneExtra( *m_setRangePopup.pZone ).name.Active() )
+			{
+				TextFocused( "Zone name:", m_worker.GetString( m_worker.GetZoneExtra( *m_setRangePopup.pZone ).name ) );
+				ImGui::Indent();
+				if ( ImGui::Selectable( ICON_FA_CHART_LINE " Plot by zone name" ) )
+				{
+					CreateZonePlot( *m_setRangePopup.pZone, PlotFilterType::ZoneName, m_worker.GetZoneExtra( *m_setRangePopup.pZone ).name.Idx(), false, nullptr );
+				}
+				if ( ImGui::Selectable( ICON_FA_CHART_LINE " Plot by zone name (per-frame total)" ) )
+				{
+					CreateZonePlot( *m_setRangePopup.pZone, PlotFilterType::ZoneName, m_worker.GetZoneExtra( *m_setRangePopup.pZone ).name.Idx(), true, nullptr );
+				}
+				ImGui::Unindent();
+				ImGui::Separator();
+			}
+
+			auto &srcloc = m_worker.GetSourceLocation( m_setRangePopup.pZone->SrcLoc() );
+			if ( srcloc.name.active )
+			{
+				TextFocused( "Source location:", m_worker.GetString( srcloc.name ) );
+			}
+			else
+			{
+				TextFocused( "Source location:", m_worker.GetString( srcloc.function ) );
+			}
+			ImGui::SameLine();
+			TextDisabledUnformatted( LocationToString( m_worker.GetString( srcloc.file ), srcloc.line ) );
+			ImGui::Indent();
+			if ( ImGui::Selectable( ICON_FA_CHART_LINE " Plot by src loc" ) )
+			{
+				CreateZonePlot( *m_setRangePopup.pZone, PlotFilterType::NoFilter, 0, false, nullptr );
+			}
+			if ( ImGui::Selectable( ICON_FA_CHART_LINE " Plot by src loc (per-frame total)" ) )
+			{
+				CreateZonePlot( *m_setRangePopup.pZone, PlotFilterType::NoFilter, 0, true, nullptr );
+			}
+			ImGui::Unindent();
+			ImGui::Separator();
+		}
         if( ImGui::Selectable( ICON_FA_MAGNIFYING_GLASS " Limit find zone time range" ) )
         {
             m_findZone.range.active = true;
@@ -1171,6 +1329,12 @@ bool View::DrawImpl()
             m_statRange.active = true;
             m_statRange.min = s;
             m_statRange.max = e;
+        }
+        if( ImGui::Selectable( ICON_FA_FIRE_FLAME_CURVED " Limit flame time range" ) )
+        {
+            m_flameRange.active = true;
+            m_flameRange.min = s;
+            m_flameRange.max = e;
         }
         if( ImGui::Selectable( ICON_FA_HOURGLASS_HALF " Limit wait stacks range" ) )
         {
@@ -1188,6 +1352,52 @@ bool View::DrawImpl()
         if( ImGui::Selectable( ICON_FA_NOTE_STICKY " Add annotation" ) )
         {
             AddAnnotation( s, e );
+        }
+        {
+            m_exportRange = RangeSlim{ 0 };
+            m_exportRange.min = s;
+            m_exportRange.max = e;
+
+            ImGui::Separator();
+            if( ImGui::Selectable( ICON_FA_FLOPPY_DISK " Export Selection to file" ) )
+            {
+                m_exportRange.active = true;
+            }
+            if( ImGui::Selectable( ICON_FA_FLOPPY_DISK " Export Frames to file" ) )
+            {
+                if ( m_worker.AreFramesUsed() )
+                {
+                    const FrameData& fd = *m_worker.GetFramesBase();
+                    std::pair<int64_t, int64_t> range = m_worker.ClampToFrames( fd, s, e );
+                    m_exportRange.min = range.first;
+                    m_exportRange.max = range.second;
+                }
+
+                m_exportRange.active = true;
+            }
+
+            if ( m_exportRange.active )
+            {
+                auto cb = [this]( const char* fn ) {
+                    const auto sz = strlen( fn );
+                    if( sz < 7 || memcmp( fn + sz - 6, ".tracy", 6 ) != 0 )
+                    {
+                        char tmp[1024];
+                        sprintf( tmp, "%s.tracy", fn );
+                        m_filenameStaging = tmp;
+                    }
+                    else
+                    {
+                        m_filenameStaging = fn;
+                    }
+                };
+
+        #ifndef TRACY_NO_FILESELECTOR
+                Fileselector::SaveFile( "tracy", "Tracy Profiler trace file", cb );
+        #else
+                cb( "trace.tracy" );
+        #endif
+            }
         }
         ImGui::EndPopup();
     }
@@ -1309,7 +1519,10 @@ bool View::DrawImpl()
         const auto inFlight = m_worker.GetSendInFlight();
         if( inFlight > 1 || ( inFlight == 1 && !m_worker.WasDisconnectIssued() ) )
         {
-            ImGui::OpenPopup( "Connection lost!" );
+            if ( !m_disconnectIssued )
+            {
+                ImGui::OpenPopup( "Connection lost!" );
+            }
         }
     }
     if( ImGui::BeginPopupModal( "Connection lost!", nullptr, ImGuiWindowFlags_AlwaysAutoResize ) )
@@ -1414,21 +1627,31 @@ void View::DrawSourceTooltip( const char* filename, uint32_t srcline, int before
     ImGui::PopStyleVar();
 }
 
-bool View::Save( const char* fn, FileCompression comp, int zlevel, bool buildDict, int streams )
+bool View::Save( const char* fn, FileCompression comp, int zlevel, bool buildDict, int streams, const RangeSlim& range )
 {
     std::unique_ptr<FileWrite> f( FileWrite::Open( fn, comp, zlevel, streams ) );
     if( !f ) return false;
 
     m_userData.StateShouldBePreserved();
+    if( !m_userData.Valid() ) m_userData.Init( m_worker.GetCaptureProgram().c_str(), m_worker.GetCaptureTime() );
     m_saveThreadState.store( SaveThreadState::Saving, std::memory_order_relaxed );
-    m_saveThread = std::thread( [this, f{std::move( f )}, buildDict] {
+    m_saveThread = std::thread( [this, f{std::move( f )}, buildDict, range] {
         std::lock_guard<std::mutex> lock( m_worker.GetDataLock() );
-        m_worker.Write( *f, buildDict );
+        if ( range.active )
+        {
+            m_worker.WriteTimeRange( *f, buildDict, range.min, range.max );
+        }
+        else
+        {
+            m_worker.Write( *f, buildDict );
+        }
+        m_userData.SaveStateJson( m_vd, false );
         f->Finish();
         const auto stats = f->GetCompressionStatistics();
         m_srcFileBytes.store( stats.first, std::memory_order_relaxed );
         m_dstFileBytes.store( stats.second, std::memory_order_relaxed );
         m_saveThreadState.store( SaveThreadState::NeedsJoin, std::memory_order_release );
+        m_requestSaveZonePlots = true;
     } );
 
     return true;

@@ -1,6 +1,7 @@
 #ifndef __TRACYWORKER_HPP__
 #define __TRACYWORKER_HPP__
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <limits>
@@ -11,6 +12,7 @@
 #include <string.h>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "../public/common/TracyForceInline.hpp"
@@ -27,8 +29,108 @@
 #include "TracyVarArray.hpp"
 
 
+// NOTE(sev): TracyWorker.cpp takes up to a minute to compile in release due to the force inlines
+// Use this define to override it from the outside if we want to.
+#if !defined( tracy_force_inline_process )
+#   define tracy_force_inline_process tracy_force_inline
+#endif
+
+
 namespace tracy
 {
+
+struct CpuPackageId
+{
+    typedef uint32_t type;
+
+    operator type() const { return val; }
+
+    type val = 0;
+};
+
+struct CpuDieId
+{
+    typedef uint32_t type;
+
+    operator type() const { return val; }
+
+    type val = 0;
+};
+
+struct CpuGroupId
+{
+    typedef uint32_t type;
+
+    operator type() const { return val; }
+
+    type val = 0;
+};
+
+struct CpuCoreId
+{
+    typedef uint32_t type;
+
+    operator type() const { return val; }
+
+    type val = 0;
+};
+
+struct CpuThreadId
+{
+    typedef uint32_t type;
+
+    operator type() const { return val; }
+
+    type val = 0;
+};
+
+
+template <>
+struct hash<::tracy::CpuPackageId>
+{
+    size_t operator()( ::tracy::CpuPackageId const &obj ) const noexcept
+    {
+        return hash_int( static_cast< uint64_t >( obj.val ) );
+    }
+};
+
+template <>
+struct hash<::tracy::CpuGroupId>
+{
+    size_t operator()( ::tracy::CpuGroupId const &obj ) const noexcept
+    {
+        return hash_int( static_cast< uint64_t >( obj.val ) );
+    }
+};
+
+template <>
+struct hash<::tracy::CpuDieId>
+{
+    size_t operator()( ::tracy::CpuDieId const &obj ) const noexcept
+    {
+        return hash_int( static_cast< uint64_t >( obj.val ) );
+    }
+};
+
+template <>
+struct hash<::tracy::CpuCoreId>
+{
+    size_t operator()( ::tracy::CpuCoreId const &obj ) const noexcept
+    {
+        return hash_int( static_cast< uint64_t >( obj.val ) );
+    }
+};
+
+
+template <>
+struct hash<::tracy::CpuThreadId>
+{
+    size_t operator()( ::tracy::CpuThreadId const &obj ) const noexcept
+    {
+        return hash_int( static_cast< uint64_t >( obj.val ) );
+    }
+};
+
 
 class FileRead;
 class FileWrite;
@@ -95,6 +197,8 @@ struct LoadProgress
     std::atomic<uint64_t> subProgress;
 };
 
+extern bool strstr_nocase( const char* l, const char* r );
+
 class Worker
 {
 public:
@@ -147,9 +251,29 @@ public:
 
     struct CpuThreadTopology
     {
-        uint32_t package;
-        uint32_t die;
-        uint32_t core;
+        uint64_t coreInGroupMask = 0;
+        CpuPackageId package;
+        CpuDieId die;
+        CpuGroupId group;
+        CpuCoreId core;
+        CpuType type = CpuType::Normal;
+    };
+
+    typedef std::vector<CpuThreadId> CpuThreadList;
+    typedef unordered_flat_map<CpuCoreId, CpuThreadList> CoreToThreadLut;
+    typedef unordered_flat_map<CpuDieId, CoreToThreadLut> DieToCoreLut;
+
+    struct CpuCacheInfo
+    {
+        CpuCacheInfo* next = nullptr;
+
+        CpuPackageId package;
+        CpuGroupId group;
+        uint64_t coreInGroupMask = 0;
+        uint8_t level = 0;
+        CacheType type = CacheType::Unknown;
+        uint32_t size = 0;
+        uint32_t linesize = 0;
     };
 
     struct MemoryBlock
@@ -313,6 +437,7 @@ private:
         bool sourceLocationZonesReady = false;
         unordered_flat_map<int16_t, GpuSourceLocationZones> gpuSourceLocationZones;
         bool gpuSourceLocationZonesReady = false;
+        Vector<PlotData *> plotsPendingDeletion;
 #else
         unordered_flat_map<int16_t, uint64_t> sourceLocationZonesCnt;
         unordered_flat_map<int16_t, uint64_t> gpuSourceLocationZonesCnt;
@@ -349,6 +474,7 @@ private:
         bool symbolSamplesReady = false;
 #endif
 
+        unordered_flat_map<uint32_t, LockMap*> activeLockMap;
         unordered_flat_map<uint32_t, LockMap*> lockMap;
 
         ThreadCompress localThreadCompress;
@@ -379,13 +505,13 @@ private:
         std::pair<uint64_t, ThreadData*> threadDataLast = std::make_pair( std::numeric_limits<uint64_t>::max(), nullptr );
         std::pair<uint64_t, ContextSwitch*> ctxSwitchLast = std::make_pair( std::numeric_limits<uint64_t>::max(), nullptr );
         uint64_t checkSrclocLast = 0;
-        std::pair<uint64_t, uint16_t> shrinkSrclocLast = std::make_pair( std::numeric_limits<uint64_t>::max(), 0 );
+        std::pair<uint64_t, int16_t> shrinkSrclocLast = std::make_pair( std::numeric_limits<uint64_t>::max(), (int16_t)0 );
 #ifndef TRACY_NO_STATISTICS
-        std::pair<uint16_t, SourceLocationZones*> srclocZonesLast = std::make_pair( 0, nullptr );
-        std::pair<uint16_t, GpuSourceLocationZones*> gpuZonesLast = std::make_pair( 0, nullptr );
+        std::pair<int16_t, SourceLocationZones*> srclocZonesLast = std::make_pair( (int16_t)0, nullptr );
+		std::pair<int16_t, GpuSourceLocationZones*> gpuZonesLast = std::make_pair( (int16_t)0, nullptr );
 #else
-        std::pair<uint16_t, uint64_t*> srclocCntLast = std::make_pair( 0, nullptr );
-        std::pair<uint16_t, uint64_t*> gpuCntLast = std::make_pair( 0, nullptr );
+        std::pair<int16_t, uint64_t*> srclocCntLast = std::make_pair( (int16_t)0, nullptr );
+		std::pair<int16_t, uint64_t*> gpuCntLast = std::make_pair( (int16_t)0, nullptr );
 #endif
 
 #ifndef TRACY_NO_STATISTICS
@@ -393,8 +519,11 @@ private:
         bool ctxUsageReady = false;
 #endif
 
-        unordered_flat_map<uint32_t, unordered_flat_map<uint32_t, unordered_flat_map<uint32_t, std::vector<uint32_t>>>> cpuTopology;
-        unordered_flat_map<uint32_t, CpuThreadTopology> cpuTopologyMap;
+        Vector<CpuThreadTopology> coreInfos;
+        unordered_flat_map<CpuPackageId, DieToCoreLut> cpuTopology;
+        unordered_flat_map<CpuThreadId, CpuCoreId> cpuTopologyMap;
+
+        CpuCacheInfo* cpuCacheList = nullptr;
 
         unordered_flat_map<uint64_t, MemoryBlock> symbolCode;
         uint64_t symbolCodeSize = 0;
@@ -405,6 +534,12 @@ private:
         bool hasBranchRetirement = false;
 
         unordered_flat_map<uint64_t, uint64_t> fiberToThreadMap;
+        unordered_flat_map<uint64_t, uint8_t> lockThreadIdToIndex;
+        unordered_flat_map<uint8_t, uint64_t> lockThreadIndexToId;
+        unordered_flat_map<uint64_t, unordered_flat_set<uint32_t>> threadToLockIdMap;
+        unordered_flat_map<uint64_t, unordered_flat_set<uint32_t>> threadToSingleLockIdMap;
+
+        HwCounterConfig hwCounterConfig;
     };
 
     struct MbpsBlock
@@ -450,10 +585,15 @@ public:
         FiberLeave,
         SourceLocationOverflow,
 
+        SyncValidation,
+        SyncValidationThread,
+        SyncValidationContext,
+
         NUM_FAILURES
     };
 
-    Worker( const char* addr, uint16_t port, int64_t memoryLimit );
+    Worker();
+    Worker( const char* addr, uint16_t port, int64_t memoryLimit, bool keepSingleThreadLocks );
     Worker( const char* name, const char* program, const std::vector<ImportEventTimeline>& timeline, const std::vector<ImportEventMessages>& messages, const std::vector<ImportEventPlots>& plots, const std::unordered_map<uint64_t, std::string>& threadNames );
     Worker( FileRead& f, EventType::Type eventMask = EventType::All, bool bgTasks = true, bool allowStringModification = false);
     ~Worker();
@@ -504,6 +644,7 @@ public:
     uint64_t GetHwSampleCountAddress() const { return m_data.hwSamples.size(); }
     uint64_t GetHwSampleCount() const;
     bool HasHwBranchRetirement() const { return m_data.hasBranchRetirement; }
+    uint64_t GetHwCounterCount() const;
 #ifndef TRACY_NO_STATISTICS
     uint64_t GetChildSamplesCountSyms() const { return m_data.childSamples.size(); }
     uint64_t GetChildSamplesCountFull() const;
@@ -526,14 +667,23 @@ public:
     uint64_t GetSourceFileCacheSize() const;
     MemoryBlock GetSourceFileFromCache( const char* file ) const;
     HwSampleData* GetHwSampleData( uint64_t addr );
+    StringIdx GetHwCounterName() const { return m_data.hwCounterConfig.name; }
+    StringIdx GetHwCounterDescription() const { return m_data.hwCounterConfig.description; }
 
     int64_t GetFrameTime( const FrameData& fd, size_t idx ) const;
     int64_t GetFrameBegin( const FrameData& fd, size_t idx ) const;
     int64_t GetFrameEnd( const FrameData& fd, size_t idx ) const;
     const FrameImage* GetFrameImage( const FrameData& fd, size_t idx ) const;
-    std::pair<int, int> GetFrameRange( const FrameData& fd, int64_t from, int64_t to );
+    std::pair<int, int> GetFrameRange( const FrameData& fd, int64_t from, int64_t to ) const;
+    std::pair<int64_t, int64_t> GetTimeRangeForFrames( uint64_t from, uint64_t to ) const;
+    std::pair<int64_t, int64_t> ClampToFrames( const FrameData& fd, int64_t from, int64_t to ) const;
 
+    size_t GetTotalLockObjectCount() const { return m_totalLockObjCount;  }
+    const unordered_flat_map<uint32_t, LockMap*>& GetActiveLockMap() const { return m_data.activeLockMap; }
     const unordered_flat_map<uint32_t, LockMap*>& GetLockMap() const { return m_data.lockMap; }
+    const unordered_flat_set<uint32_t>& GetLockIdsForThread( uint64_t tid ) const;
+    const unordered_flat_set<uint32_t>& GetTerminatedSingleThreadLockIdsForThread( uint64_t tid ) const;
+
     const Vector<short_ptr<MessageData>>& GetMessages() const { return m_data.messages; }
     const Vector<GpuCtxData*>& GetGpuData() const { return m_data.gpuData; }
     const Vector<PlotData*>& GetPlots() const { return m_data.plots.Data(); }
@@ -578,6 +728,8 @@ public:
     static tracy_force_inline int64_t GetZoneEndDirect( const ZoneEvent& ev ) { return ev.IsEndValid() ? ev.End() : ev.Start(); }
     static tracy_force_inline int64_t GetZoneEndDirect( const GpuEvent& ev ) { return ev.GpuEnd() >= 0 ? ev.GpuEnd() : ev.GpuStart(); }
 
+    std::string GetFormattedCpuName( uint32_t cpuThread ) const;
+
     uint32_t FindStringIdx( const char* str ) const;
     const char* GetString( uint64_t ptr ) const;
     const char* GetString( const StringRef& ref ) const;
@@ -604,10 +756,14 @@ public:
     tracy_force_inline const ZoneExtra& GetZoneExtra( const ZoneEvent& ev ) const { return m_data.zoneExtra[ev.extra]; }
 
     std::vector<int16_t> GetMatchingSourceLocation( const char* query, bool ignoreCase ) const;
+    std::vector<int16_t> GetMatchingZonePattern( const char* query, bool ignoreCase ) const;
 
     const unordered_flat_map<uint64_t, SymbolData>& GetSymbolMap() const { return m_data.symbolMap; }
 
 #ifndef TRACY_NO_STATISTICS
+    const char *PlotHelper_GetStringForFilterType( PlotFilterType filterType ) const;
+    const char *PlotHelper_GetStringForFilterId( int16_t srcloc, PlotFilterType filterType, uint64_t filterId ) const;
+    PlotData *CreatePlotForSourceLocation( int16_t srcloc, PlotFilterType filterType, uint64_t filterId, bool bAggregatePerFrame, PlotDrawType drawType, PlotData *pAddToExistingPlot );
     SourceLocationZones& GetZonesForSourceLocation( int16_t srcloc );
     const SourceLocationZones& GetZonesForSourceLocation( int16_t srcloc ) const;
     const unordered_flat_map<int16_t, SourceLocationZones>& GetSourceLocationZones() const { return m_data.sourceLocationZones; }
@@ -623,11 +779,13 @@ public:
     bool AreCallstackSamplesReady() const { return m_data.callstackSamplesReady; }
     bool AreGhostZonesReady() const { return m_data.ghostZonesReady; }
     bool AreSymbolSamplesReady() const { return m_data.symbolSamplesReady; }
+    void QueuePlotForDelete( PlotData *plot ) { m_data.plotsPendingDeletion.push_back(plot); }
 #endif
 
     tracy_force_inline uint16_t CompressThread( uint64_t thread ) { return m_data.localThreadCompress.CompressThread( thread ); }
     tracy_force_inline uint64_t DecompressThread( uint16_t thread ) const { return m_data.localThreadCompress.DecompressThread( thread ); }
     tracy_force_inline uint64_t DecompressThreadExternal( uint16_t thread ) const { return m_data.externalThreadCompress.DecompressThread( thread ); }
+    tracy_force_inline size_t GetExternalCompressedThreadCount() const { return m_data.externalThreadCompress.GetCompressedThreadCount(); }
 
     std::shared_mutex& GetMbpsDataLock() { return m_mbpsData.lock; }
     const std::vector<float>& GetMbpsData() const { return m_mbpsData.mbps; }
@@ -641,12 +799,16 @@ public:
     bool IsDataStatic() const { return !m_thread.joinable(); }
     bool IsBackgroundDone() const { return m_backgroundDone.load( std::memory_order_relaxed ); }
     bool IsOnDemand() const { return m_onDemand; }
+    bool GetExportRange( int64_t& from, int64_t& to ) const { from = m_exportStart; to = m_exportEnd; return (m_exportStart != m_exportEnd ); }
     void Shutdown() { m_shutdown.store( true, std::memory_order_relaxed ); }
     void Disconnect();
     bool WasDisconnectIssued() const { return m_disconnect; }
     int64_t GetMemoryLimit() const { return m_memoryLimit; }
 
     void Write( FileWrite& f, bool fiDict );
+    void WriteFrameRange( FileWrite& f, bool fiDict, uint64_t from, uint64_t to );
+    void WriteTimeRange( FileWrite& f, bool fiDict, int64_t from, int64_t to );
+
     int GetTraceVersion() const { return m_traceVersion; }
     uint8_t GetHandshakeStatus() const { return m_handshake.load( std::memory_order_relaxed ); }
     int64_t GetSamplingPeriod() const { return m_samplingPeriod; }
@@ -666,7 +828,13 @@ public:
     void SetParameter( size_t paramIdx, int32_t val );
 
     const decltype(DataBlock::cpuTopology)& GetCpuTopology() const { return m_data.cpuTopology; }
-    const CpuThreadTopology* GetThreadTopology( uint32_t cpuThread ) const;
+    const Vector<CpuThreadTopology> &GetTopoCoreInfos() const { return m_data.coreInfos; }
+    const CpuThreadTopology* GetThreadTopology( CpuThreadId cpuThread ) const;
+    const CpuThreadTopology* GetThreadTopology( CpuCoreId core ) const;
+
+    const CpuCacheInfo* GetCacheList() const { return m_data.cpuCacheList; }
+    void GetCoresForCache( const CpuCacheInfo* cacheInfo, std::vector<const CpuThreadTopology*>& cores ) const;
+    void GetCachesForCore( const CpuThreadTopology* cpuInfo, std::vector<const CpuCacheInfo*>& caches ) const;
 
     std::pair<uint64_t, uint64_t> GetTextureCompressionBytes() const { return std::make_pair( m_texcomp.GetInputBytesCount(), m_texcomp.GetOutputBytesCount() ); }
 
@@ -678,9 +846,29 @@ public:
     void CacheSourceFiles();
 
     StringLocation StoreString(const char* str, size_t sz);
+    void CreateZonesFromGpuData();
 
     std::vector<uint32_t>& GetPendingThreadHints() { return m_pendingThreadHints; }
     void ClearPendingThreadHints() { m_pendingThreadHints.clear(); }
+
+    bool BeginProcessing( HandshakeStatus handshake, const WelcomeMessage& welcome, uint8_t flags, int64_t captureTime, OnDemandPayloadMessage onDemand, int sendBufferSize );
+    bool ProcessData( const char *ptr, const char *end, uint32_t id = 0 );
+
+    struct ServerQueryBatch
+    {
+        bool wasBufferingQueries;
+
+        size_t highPrioCount;
+        ServerQueryPacket *pHighPrioQueries;
+
+        size_t count;
+        ServerQueryPacket *pQueries;
+    };
+
+    size_t GetServerQueryBatchCount() const;
+    ServerQueryBatch BeginProcessServerQueries();
+    void EndProcessServerQueries( ServerQueryBatch* queryInfo );
+    bool HasPendingQueries();
 
 private:
     void Network();
@@ -692,91 +880,103 @@ private:
 
     tracy_force_inline bool DispatchProcess( const QueueItem& ev, const char*& ptr );
     tracy_force_inline bool Process( const QueueItem& ev );
-    tracy_force_inline void ProcessThreadContext( const QueueThreadContext& ev );
-    tracy_force_inline void ProcessZoneBegin( const QueueZoneBegin& ev );
-    tracy_force_inline void ProcessZoneBeginCallstack( const QueueZoneBegin& ev );
-    tracy_force_inline void ProcessZoneBeginAllocSrcLoc( const QueueZoneBeginLean& ev );
-    tracy_force_inline void ProcessZoneBeginAllocSrcLocCallstack( const QueueZoneBeginLean& ev );
-    tracy_force_inline void ProcessZoneEnd( const QueueZoneEnd& ev );
-    tracy_force_inline void ProcessZoneValidation( const QueueZoneValidation& ev );
-    tracy_force_inline void ProcessFrameMark( const QueueFrameMark& ev );
-    tracy_force_inline void ProcessFrameMarkStart( const QueueFrameMark& ev );
-    tracy_force_inline void ProcessFrameMarkEnd( const QueueFrameMark& ev );
-    tracy_force_inline void ProcessFrameVsync( const QueueFrameVsync& ev );
-    tracy_force_inline void ProcessFrameImage( const QueueFrameImage& ev );
-    tracy_force_inline void ProcessZoneText();
-    tracy_force_inline void ProcessZoneName();
-    tracy_force_inline void ProcessZoneColor( const QueueZoneColor& ev );
-    tracy_force_inline void ProcessZoneValue( const QueueZoneValue& ev );
-    tracy_force_inline void ProcessLockAnnounce( const QueueLockAnnounce& ev );
-    tracy_force_inline void ProcessLockTerminate( const QueueLockTerminate& ev );
-    tracy_force_inline void ProcessLockWait( const QueueLockWait& ev );
-    tracy_force_inline void ProcessLockObtain( const QueueLockObtain& ev );
-    tracy_force_inline void ProcessLockRelease( const QueueLockRelease& ev );
-    tracy_force_inline void ProcessLockSharedWait( const QueueLockWait& ev );
-    tracy_force_inline void ProcessLockSharedObtain( const QueueLockObtain& ev );
-    tracy_force_inline void ProcessLockSharedRelease( const QueueLockReleaseShared& ev );
-    tracy_force_inline void ProcessLockMark( const QueueLockMark& ev );
-    tracy_force_inline void ProcessLockName( const QueueLockName& ev );
-    tracy_force_inline void ProcessPlotDataInt( const QueuePlotDataInt& ev );
-    tracy_force_inline void ProcessPlotDataFloat( const QueuePlotDataFloat& ev );
-    tracy_force_inline void ProcessPlotDataDouble( const QueuePlotDataDouble& ev );
-    tracy_force_inline void ProcessPlotConfig( const QueuePlotConfig& ev );
-    tracy_force_inline void ProcessMessage( const QueueMessage& ev );
-    tracy_force_inline void ProcessMessageLiteral( const QueueMessageLiteral& ev );
-    tracy_force_inline void ProcessMessageColor( const QueueMessageColor& ev );
-    tracy_force_inline void ProcessMessageLiteralColor( const QueueMessageColorLiteral& ev );
-    tracy_force_inline void ProcessMessageCallstack( const QueueMessage& ev );
-    tracy_force_inline void ProcessMessageLiteralCallstack( const QueueMessageLiteral& ev );
-    tracy_force_inline void ProcessMessageColorCallstack( const QueueMessageColor& ev );
-    tracy_force_inline void ProcessMessageLiteralColorCallstack( const QueueMessageColorLiteral& ev );
-    tracy_force_inline void ProcessMessageAppInfo( const QueueMessage& ev );
-    tracy_force_inline void ProcessGpuNewContext( const QueueGpuNewContext& ev );
-    tracy_force_inline void ProcessGpuZoneBegin( const QueueGpuZoneBegin& ev, bool serial );
-    tracy_force_inline void ProcessGpuZoneBeginCallstack( const QueueGpuZoneBegin& ev, bool serial );
-    tracy_force_inline void ProcessGpuZoneBeginAllocSrcLoc( const QueueGpuZoneBeginLean& ev, bool serial );
-    tracy_force_inline void ProcessGpuZoneBeginAllocSrcLocCallstack( const QueueGpuZoneBeginLean& ev, bool serial );
-    tracy_force_inline void ProcessGpuZoneEnd( const QueueGpuZoneEnd& ev, bool serial );
-    tracy_force_inline void ProcessGpuTime( const QueueGpuTime& ev );
-    tracy_force_inline void ProcessGpuCalibration( const QueueGpuCalibration& ev );
-    tracy_force_inline void ProcessGpuTimeSync( const QueueGpuTimeSync& ev );
-    tracy_force_inline void ProcessGpuContextName( const QueueGpuContextName& ev );
-    tracy_force_inline MemEvent* ProcessMemAlloc( const QueueMemAlloc& ev );
-    tracy_force_inline MemEvent* ProcessMemAllocNamed( const QueueMemAlloc& ev );
-    tracy_force_inline MemEvent* ProcessMemFree( const QueueMemFree& ev );
-    tracy_force_inline MemEvent* ProcessMemFreeNamed( const QueueMemFree& ev );
-    tracy_force_inline void ProcessMemDiscard( const QueueMemDiscard& ev );
-    tracy_force_inline void ProcessMemAllocCallstack( const QueueMemAlloc& ev );
-    tracy_force_inline void ProcessMemAllocCallstackNamed( const QueueMemAlloc& ev );
-    tracy_force_inline void ProcessMemFreeCallstack( const QueueMemFree& ev );
-    tracy_force_inline void ProcessMemFreeCallstackNamed( const QueueMemFree& ev );
-    tracy_force_inline void ProcessMemDiscardCallstack( const QueueMemDiscard& ev );
-    tracy_force_inline void ProcessCallstackSerial();
-    tracy_force_inline void ProcessCallstack();
-    tracy_force_inline void ProcessCallstackSample( const QueueCallstackSample& ev );
-    tracy_force_inline void ProcessCallstackSampleContextSwitch( const QueueCallstackSample& ev );
-    tracy_force_inline void ProcessCallstackFrameSize( const QueueCallstackFrameSize& ev );
-    tracy_force_inline void ProcessCallstackFrame( const QueueCallstackFrame& ev, bool querySymbols );
-    tracy_force_inline void ProcessSymbolInformation( const QueueSymbolInformation& ev );
-    tracy_force_inline void ProcessCrashReport( const QueueCrashReport& ev );
-    tracy_force_inline void ProcessSysTime( const QueueSysTime& ev );
-    tracy_force_inline void ProcessSysPower( const QueueSysPower& ev );
-    tracy_force_inline void ProcessContextSwitch( const QueueContextSwitch& ev );
-    tracy_force_inline void ProcessThreadWakeup( const QueueThreadWakeup& ev );
-    tracy_force_inline void ProcessTidToPid( const QueueTidToPid& ev );
-    tracy_force_inline void ProcessHwSampleCpuCycle( const QueueHwSample& ev );
-    tracy_force_inline void ProcessHwSampleInstructionRetired( const QueueHwSample& ev );
-    tracy_force_inline void ProcessHwSampleCacheReference( const QueueHwSample& ev );
-    tracy_force_inline void ProcessHwSampleCacheMiss( const QueueHwSample& ev );
-    tracy_force_inline void ProcessHwSampleBranchRetired( const QueueHwSample& ev );
-    tracy_force_inline void ProcessHwSampleBranchMiss( const QueueHwSample& ev );
-    tracy_force_inline void ProcessParamSetup( const QueueParamSetup& ev );
-    tracy_force_inline void ProcessSourceCodeNotAvailable( const QueueSourceCodeNotAvailable& ev );
-    tracy_force_inline void ProcessCpuTopology( const QueueCpuTopology& ev );
-    tracy_force_inline void ProcessMemNamePayload( const QueueMemNamePayload& ev );
-    tracy_force_inline void ProcessThreadGroupHint( const QueueThreadGroupHint& ev );
-    tracy_force_inline void ProcessFiberEnter( const QueueFiberEnter& ev );
-    tracy_force_inline void ProcessFiberLeave( const QueueFiberLeave& ev );
+
+    tracy_force_inline_process void ProcessConnectionSyncBegin( const QueueConnectionSyncBegin &ev );
+    tracy_force_inline_process void ProcessConnectionSyncEnd( const QueueConnectionSyncEnd &ev );
+    tracy_force_inline_process void ProcessSyncValidation( const QueueSyncValidation &ev );
+    tracy_force_inline_process void ProcessSyncValidationThread( const QueueSyncValidationThread &ev );
+    tracy_force_inline_process void ProcessSyncValidationContext( const QueueSyncValidationContext &ev );
+    tracy_force_inline_process void ProcessThreadContext( const QueueThreadContext& ev );
+    tracy_force_inline_process void ProcessZoneBegin( const QueueZoneBegin& ev );
+    tracy_force_inline_process void ProcessZoneBeginCallstack( const QueueZoneBegin& ev );
+    tracy_force_inline_process void ProcessZoneBeginAllocSrcLoc( const QueueZoneBeginLean& ev );
+    tracy_force_inline_process void ProcessZoneBeginAllocSrcLocCallstack( const QueueZoneBeginLean& ev );
+    tracy_force_inline_process void ProcessZoneEnd( const QueueZoneEnd& ev );
+    tracy_force_inline_process void ProcessZoneValidation( const QueueZoneValidation& ev );
+    tracy_force_inline_process void ProcessFrameMark( const QueueFrameMark& ev );
+    tracy_force_inline_process void ProcessFrameMarkStart( const QueueFrameMark& ev );
+    tracy_force_inline_process void ProcessFrameMarkEnd( const QueueFrameMark& ev );
+    tracy_force_inline_process void ProcessFrameVsync( const QueueFrameVsync& ev );
+    tracy_force_inline_process void ProcessFrameImage( const QueueFrameImage& ev );
+    tracy_force_inline_process void ProcessZoneText();
+    tracy_force_inline_process void ProcessZoneName();
+    tracy_force_inline_process void ProcessZoneColor( const QueueZoneColor& ev );
+    tracy_force_inline_process void ProcessZoneValue( const QueueZoneValue& ev );
+    tracy_force_inline_process void ProcessGlobalLockSyncBegin( const QueueGlobalLockSyncBegin& ev );
+    tracy_force_inline_process void ProcessGlobalLockSyncEnd( const QueueGlobalLockSyncEnd& ev );
+    tracy_force_inline_process void ProcessLockAnnounce( const QueueLockAnnounce& ev );
+    tracy_force_inline_process void ProcessLockTerminate( const QueueLockTerminate& ev );
+    tracy_force_inline_process void ProcessLockWait( const QueueLockWait& ev );
+    tracy_force_inline_process void ProcessLockObtain( const QueueLockObtain& ev );
+    tracy_force_inline_process void ProcessLockRelease( const QueueLockRelease& ev );
+    tracy_force_inline_process void ProcessLockSharedWait( const QueueLockWait& ev );
+    tracy_force_inline_process void ProcessLockSharedObtain( const QueueLockObtain& ev );
+    tracy_force_inline_process void ProcessLockSharedRelease( const QueueLockReleaseShared& ev );
+    tracy_force_inline_process void ProcessLockMark( const QueueLockMark& ev );
+    tracy_force_inline_process void ProcessLockMarkFileLine( const QueueLockMarkFileLine& ev );
+    tracy_force_inline_process void ProcessLockName( const QueueLockName& ev );
+    tracy_force_inline_process void ProcessPlotDataInt( const QueuePlotDataInt& ev );
+    tracy_force_inline_process void ProcessPlotDataFloat( const QueuePlotDataFloat& ev );
+    tracy_force_inline_process void ProcessPlotDataDouble( const QueuePlotDataDouble& ev );
+    tracy_force_inline_process void ProcessPlotConfig( const QueuePlotConfig& ev );
+    tracy_force_inline_process void ProcessMessage( const QueueMessage& ev );
+    tracy_force_inline_process void ProcessMessageLiteral( const QueueMessageLiteral& ev );
+    tracy_force_inline_process void ProcessMessageColor( const QueueMessageColor& ev );
+    tracy_force_inline_process void ProcessMessageLiteralColor( const QueueMessageColorLiteral& ev );
+    tracy_force_inline_process void ProcessMessageCallstack( const QueueMessage& ev );
+    tracy_force_inline_process void ProcessMessageLiteralCallstack( const QueueMessageLiteral& ev );
+    tracy_force_inline_process void ProcessMessageColorCallstack( const QueueMessageColor& ev );
+    tracy_force_inline_process void ProcessMessageLiteralColorCallstack( const QueueMessageColorLiteral& ev );
+    tracy_force_inline_process void ProcessMessageAppInfo( const QueueMessage& ev );
+    tracy_force_inline_process void ProcessGpuNewContext( const QueueGpuNewContext& ev );
+    tracy_force_inline_process void ProcessGpuZoneBegin( const QueueGpuZoneBegin& ev, bool serial );
+    tracy_force_inline_process void ProcessGpuZoneBeginCallstack( const QueueGpuZoneBegin& ev, bool serial );
+    tracy_force_inline_process void ProcessGpuZoneBeginAllocSrcLoc( const QueueGpuZoneBeginLean& ev, bool serial );
+    tracy_force_inline_process void ProcessGpuZoneBeginAllocSrcLocCallstack( const QueueGpuZoneBeginLean& ev, bool serial );
+    tracy_force_inline_process void ProcessGpuZoneEnd( const QueueGpuZoneEnd& ev, bool serial );
+    tracy_force_inline_process void ProcessGpuTime( const QueueGpuTime& ev );
+    tracy_force_inline_process void ProcessGpuCalibration( const QueueGpuCalibration& ev );
+    tracy_force_inline_process void ProcessGpuTimeSync( const QueueGpuTimeSync& ev );
+    tracy_force_inline_process void ProcessGpuContextName( const QueueGpuContextName& ev );
+    tracy_force_inline_process MemEvent* ProcessMemAlloc( const QueueMemAlloc& ev );
+    tracy_force_inline_process MemEvent* ProcessMemAllocNamed( const QueueMemAlloc& ev );
+    tracy_force_inline_process MemEvent* ProcessMemFree( const QueueMemFree& ev );
+    tracy_force_inline_process MemEvent* ProcessMemFreeNamed( const QueueMemFree& ev );
+    tracy_force_inline_process void ProcessMemDiscard( const QueueMemDiscard& ev );
+    tracy_force_inline_process void ProcessMemAllocCallstack( const QueueMemAlloc& ev );
+    tracy_force_inline_process void ProcessMemAllocCallstackNamed( const QueueMemAlloc& ev );
+    tracy_force_inline_process void ProcessMemFreeCallstack( const QueueMemFree& ev );
+    tracy_force_inline_process void ProcessMemFreeCallstackNamed( const QueueMemFree& ev );
+    tracy_force_inline_process void ProcessMemDiscardCallstack( const QueueMemDiscard& ev );
+    tracy_force_inline_process void ProcessCallstackSerial();
+    tracy_force_inline_process void ProcessCallstack();
+    tracy_force_inline_process void ProcessCallstackSample( const QueueCallstackSample& ev );
+    tracy_force_inline_process void ProcessCallstackSampleContextSwitch( const QueueCallstackSample& ev );
+    tracy_force_inline_process void ProcessCallstackFrameSize( const QueueCallstackFrameSize& ev );
+    tracy_force_inline_process void ProcessCallstackFrame( const QueueCallstackFrame& ev, bool querySymbols );
+    tracy_force_inline_process void ProcessSymbolInformation( const QueueSymbolInformation& ev );
+    tracy_force_inline_process void ProcessCrashReport( const QueueCrashReport& ev );
+    tracy_force_inline_process void ProcessSysTime( const QueueSysTime& ev );
+    tracy_force_inline_process void ProcessSysPower( const QueueSysPower& ev );
+    tracy_force_inline_process void ProcessContextSwitch( const QueueContextSwitch& ev );
+    tracy_force_inline_process void ProcessThreadWakeup( const QueueThreadWakeup& ev );
+    tracy_force_inline_process void ProcessTidToPid( const QueueTidToPid& ev );
+    tracy_force_inline_process void ProcessHwSampleCpuCycle( const QueueHwSample& ev );
+    tracy_force_inline_process void ProcessHwSampleInstructionRetired( const QueueHwSample& ev );
+    tracy_force_inline_process void ProcessHwSampleCacheReference( const QueueHwSample& ev );
+    tracy_force_inline_process void ProcessHwSampleCacheMiss( const QueueHwSample& ev );
+    tracy_force_inline_process void ProcessHwSampleBranchRetired( const QueueHwSample& ev );
+    tracy_force_inline_process void ProcessHwSampleBranchMiss( const QueueHwSample& ev );
+    tracy_force_inline_process void ProcessHwCounter( const QueueHwCounter& ev );
+    tracy_force_inline_process void ProcessHwCounterConfig( const QueueHwCounterConfig& ev );
+    tracy_force_inline_process void ProcessParamSetup( const QueueParamSetup& ev );
+    tracy_force_inline_process void ProcessSourceCodeNotAvailable( const QueueSourceCodeNotAvailable& ev );
+    tracy_force_inline_process void ProcessCpuTopology( const QueueCpuTopology& ev );
+    tracy_force_inline_process void ProcessCacheTopology( const QueueCacheTopology& ev );
+    tracy_force_inline_process void ProcessMemNamePayload( const QueueMemNamePayload& ev );
+    tracy_force_inline_process void ProcessThreadGroupHint( const QueueThreadGroupHint& ev );
+    tracy_force_inline_process void ProcessFiberEnter( const QueueFiberEnter& ev );
+    tracy_force_inline_process void ProcessFiberLeave( const QueueFiberLeave& ev );
 
     tracy_force_inline ZoneEvent* AllocZoneEvent();
     tracy_force_inline void ProcessZoneBeginImpl( ZoneEvent* zone, const QueueZoneBegin& ev );
@@ -871,7 +1071,9 @@ private:
 
     tracy_force_inline void NewZone( ZoneEvent* zone );
 
-    void InsertLockEvent( LockMap& lockmap, LockEvent* lev, uint64_t thread, int64_t time );
+    void InsertCpuCache( CpuCacheInfo* cache );
+
+    void InsertLockEvent( LockMap& lockmap, LockEvent* lev, uint64_t thread, uint32_t lockid, int64_t time );
 
     bool CheckString( uint64_t ptr );
     void CheckThreadString( uint64_t id );
@@ -933,10 +1135,10 @@ private:
     tracy_force_inline int AddGhostZone( const VarArray<CallstackFrameId>& cs, Vector<GhostZone>* vec, uint64_t t );
 #endif
 
-    tracy_force_inline int64_t ReadTimeline( FileRead& f, ZoneEvent* zone, int64_t refTime, int32_t& childIdx );
-    tracy_force_inline int64_t ReadTimelineHaveSize( FileRead& f, ZoneEvent* zone, int64_t refTime, int32_t& childIdx, uint32_t sz );
-    tracy_force_inline void ReadTimeline( FileRead& f, GpuEvent* zone, int64_t& refTime, int64_t& refGpuTime, int32_t& childIdx );
-    tracy_force_inline void ReadTimelineHaveSize( FileRead& f, GpuEvent* zone, int64_t& refTime, int64_t& refGpuTime, int32_t& childIdx, uint64_t sz );
+    tracy_force_inline int64_t ReadTimeline( FileRead& f, ZoneEvent* zone, int64_t refTime, int32_t& childIdx, int32_t& maxd, int32_t level );
+    tracy_force_inline int64_t ReadTimelineHaveSize( FileRead& f, ZoneEvent* zone, int64_t refTime, int32_t& childIdx, uint32_t sz, int32_t& maxd, int32_t level );
+    tracy_force_inline void ReadTimeline( FileRead& f, GpuEvent* zone, int64_t& refTime, int64_t& refGpuTime, int32_t& childIdx, int32_t& maxd, int32_t level );
+    tracy_force_inline void ReadTimelineHaveSize( FileRead& f, GpuEvent* zone, int64_t& refTime, int64_t& refGpuTime, int32_t& childIdx, uint64_t sz, int32_t& maxd, int32_t level );
 
 #ifndef TRACY_NO_STATISTICS
     tracy_force_inline void ReconstructZoneStatistics( uint8_t* countMap, ZoneEvent& zone, uint16_t thread );
@@ -955,56 +1157,72 @@ private:
 
     void UpdateMbps( int64_t td );
 
-    int64_t ReadTimeline( FileRead& f, Vector<short_ptr<ZoneEvent>>& vec, uint32_t size, int64_t refTime, int32_t& childIdx );
-    void ReadTimeline( FileRead& f, Vector<short_ptr<GpuEvent>>& vec, uint64_t size, int64_t& refTime, int64_t& refGpuTime, int32_t& childIdx );
+    int64_t ReadTimeline( FileRead& f, Vector<short_ptr<ZoneEvent>>& vec, uint32_t size, int64_t refTime, int32_t& childIdx, int32_t& maxd, int32_t level = 1 );
+    void ReadTimeline( FileRead& f, Vector<short_ptr<GpuEvent>>& vec, uint64_t size, int64_t& refTime, int64_t& refGpuTime, int32_t& childIdx, int32_t& maxd, int32_t level = 1 );
 
-    tracy_force_inline void WriteTimeline( FileWrite& f, const Vector<short_ptr<ZoneEvent>>& vec, int64_t& refTime );
-    tracy_force_inline void WriteTimeline( FileWrite& f, const Vector<short_ptr<GpuEvent>>& vec, int64_t& refTime, int64_t& refGpuTime );
+    uint64_t GetContextSwitchPerCpuCount( int64_t from, int64_t to ) const;
+    uint64_t GetHwCounterCount( int64_t from, int64_t to ) const;
+    void WriteFrames( FileWrite& f, const FrameData* fd, int64_t from, int64_t to ) const;
+
+    tracy_force_inline void WriteTimeline( FileWrite& f, const Vector<short_ptr<ZoneEvent>>& vec, int64_t& refTime, int64_t from, int64_t to );
+    tracy_force_inline void WriteTimeline( FileWrite& f, const Vector<short_ptr<GpuEvent>>& vec, int64_t& refTime, int64_t& refGpuTime, int64_t from, int64_t to );
+
     template<typename Adapter, typename V>
-    void WriteTimelineImpl( FileWrite& f, const V& vec, int64_t& refTime );
+    uint32_t CountTimelineImpl( const V& vec, int64_t from, int64_t to );
     template<typename Adapter, typename V>
-    void WriteTimelineImpl( FileWrite& f, const V& vec, int64_t& refTime, int64_t& refGpuTime );
+    uint64_t CountGpuTimelineImpl( const V& vec, int64_t from, int64_t to );
+
+    template<typename Adapter, typename V>
+    void WriteTimelineImpl( FileWrite& f, const V& vec, int64_t& refTime, int64_t from, int64_t to );
+    template<typename Adapter, typename V>
+    void WriteTimelineImpl( FileWrite& f, const V& vec, int64_t& refTime, int64_t& refGpuTime, int64_t from, int64_t to );
 
     int64_t TscTime( int64_t tsc ) { return int64_t( ( tsc - m_data.baseTime ) * m_timerMul ); }
     int64_t TscTime( uint64_t tsc ) { return int64_t( ( tsc - m_data.baseTime ) * m_timerMul ); }
     int64_t TscPeriod( uint64_t tsc ) { return int64_t( tsc * m_timerMul ); }
 
+    template<typename Adapter, typename V>
+    void CreateZonesFromGpuDataImpl( const V &vec, uint64_t gpuThreadId );
+
     Socket m_sock;
     std::string m_addr;
-    uint16_t m_port;
+    uint16_t m_port = 0;
+    bool m_keepSingleThreadLocks = false;
 
     std::thread m_thread;
     std::thread m_threadNet;
     std::atomic<bool> m_connected { false };
-    std::atomic<bool> m_hasData;
+    std::atomic<bool> m_hasData { false };
     std::atomic<bool> m_shutdown { false };
 
     std::atomic<bool> m_backgroundDone { true };
     std::thread m_threadBackground;
 
-    int64_t m_delay;
-    int64_t m_resolution;
-    double m_timerMul;
+    int64_t m_delay = 0;
+    int64_t m_resolution = 0;
+    double m_timerMul = 0.0;
     std::string m_captureName;
     std::string m_captureProgram;
-    uint64_t m_captureTime;
-    uint64_t m_executableTime;
+    uint64_t m_captureTime = 0;
+    uint64_t m_executableTime = 0;
     std::string m_hostInfo;
-    uint64_t m_pid;
-    int64_t m_samplingPeriod;
+    uint64_t m_pid = 0;
+    int64_t m_samplingPeriod = 0;
+    int64_t m_exportStart = 0;
+    int64_t m_exportEnd = 0;
     bool m_terminate = false;
     bool m_crashed = false;
     bool m_disconnect = false;
-    void* m_stream;     // LZ4_streamDecode_t*
-    char* m_buffer;
-    int m_bufferOffset;
-    bool m_onDemand;
-    bool m_ignoreMemFreeFaults;
-    bool m_ignoreFrameEndFaults;
-    bool m_codeTransfer;
-    bool m_combineSamples;
+    void* m_stream = nullptr;     // LZ4_streamDecode_t*
+    char* m_buffer = nullptr;
+    int m_bufferOffset = 0;
+    bool m_onDemand = false;
+    bool m_ignoreMemFreeFaults = false;
+    bool m_ignoreFrameEndFaults = false;
+    bool m_codeTransfer = false;
+    bool m_combineSamples = false;
     bool m_identifySamples = false;
-    bool m_inconsistentSamples;
+    bool m_inconsistentSamples = false;
     bool m_allowStringModification = false;
 
     short_ptr<GpuCtxData> m_gpuCtxMap[256];
@@ -1021,17 +1239,17 @@ private:
     StringLocation m_pendingSingleString = {};
     StringLocation m_pendingSecondString = {};
 
-    uint32_t m_pendingStrings;
-    uint32_t m_pendingThreads;
-    uint32_t m_pendingFibers;
-    uint32_t m_pendingExternalNames;
-    uint32_t m_pendingSourceLocation;
-    uint32_t m_pendingCallstackFrames;
-    uint8_t m_pendingCallstackSubframes;
-    uint32_t m_pendingSymbolCode;
+    uint32_t m_pendingStrings = 0;
+    uint32_t m_pendingThreads = 0;
+    uint32_t m_pendingFibers = 0;
+    uint32_t m_pendingExternalNames = 0;
+    uint32_t m_pendingSourceLocation = 0;
+    uint32_t m_pendingCallstackFrames = 0;
+    uint8_t m_pendingCallstackSubframes = 0;
+    uint32_t m_pendingSymbolCode = 0;
 
-    CallstackFrameData* m_callstackFrameStaging;
-    uint64_t m_callstackFrameStagingPtr;
+    CallstackFrameData* m_callstackFrameStaging = nullptr;
+    uint64_t m_callstackFrameStagingPtr = 0;
     uint64_t m_callstackAllocNextIdx = 0;
     uint64_t m_callstackParentNextIdx = 0;
 
@@ -1039,24 +1257,85 @@ private:
     uint64_t m_memNamePayload = 0;
 
     Slab<64*1024*1024> m_slab;
-    int64_t m_memoryLimit;
+    int64_t m_memoryLimit = -1;
+
+    size_t m_totalLockObjCount = 0;
+
+    struct LockMapFreeNode
+    {
+        LockMapFreeNode *next;
+        uint32_t lockId;
+    };
+
+    LockMapFreeNode* m_lockMapFreeList = nullptr;
+    LockMap* AllocLockMap( uint32_t lockid );
+    void FreeLockMap( LockMap* lm, uint32_t lockid );
+
+    struct LockEventFreeNode
+    {
+        LockEventFreeNode *next;
+    };
+
+    LockEvent* AllocLockEvent( LockType type );
+    void FreeLockEvent( LockEvent* ev );
+    LockEventFreeNode* m_lockEvFreeList = nullptr;
+    LockEventFreeNode* m_sharedLockEvFreeList = nullptr;;
 
     DataBlock m_data;
     MbpsBlock m_mbpsData;
 
-    int m_traceVersion;
+    int m_traceVersion = 0;
     std::atomic<uint8_t> m_handshake { 0 };
 
     static LoadProgress s_loadProgress;
-    int64_t m_loadTime;
+    int64_t m_loadTime = 0;
 
     Failure m_failure = Failure::None;
     FailureData m_failureData = {};
 
     PlotData* m_sysTimePlot = nullptr;
 
-    Vector<ServerQueryPacket> m_serverQueryQueue, m_serverQueryQueuePrio;
-    size_t m_serverQuerySpaceLeft, m_serverQuerySpaceBase;
+    struct ServerQueryChunk
+    {
+        enum { QueriesPerChunk = 1 * 1024 * 1024 };
+
+        ServerQueryChunk();
+
+        bool empty() const;
+
+        size_t avail() const;
+        ServerQueryPacket* data();
+
+        ServerQueryChunk* m_pNext = nullptr;
+        size_t m_write = 0;
+        size_t m_read = 0;
+        std::array<ServerQueryPacket, QueriesPerChunk> m_queries;
+    };
+
+    struct ServerQueryQueue
+    {
+        ServerQueryQueue();
+        ~ServerQueryQueue();
+
+        bool empty() const;
+        size_t total_size() const;
+        size_t chunk_count() const;
+
+        size_t avail() const;
+        ServerQueryPacket* data();
+
+        void push_back( const ServerQueryPacket& data );
+        void pop_front( size_t count );
+
+        ServerQueryChunk* m_pFirst = nullptr;
+        ServerQueryChunk* m_pLast = nullptr;
+    };
+
+    ServerQueryQueue m_serverQueryQueue;
+    ServerQueryQueue m_serverQueryQueuePrio;
+    size_t m_serverQuerySpaceLeft = 0;
+    size_t m_serverQuerySpaceBase = 0;
+    bool m_bufferServerQueries = false;
 
     unordered_flat_map<uint64_t, int32_t> m_frameImageStaging;
     char* m_frameImageBuffer = nullptr;

@@ -157,6 +157,9 @@ uint32_t GetPlotColor( const PlotData& plot, const Worker& worker )
         return 0xFFBAB220;
     case PlotType::Power:
         return 0xFF33CC33;
+    case PlotType::Zone:
+        if ( plot.color != 0 ) return plot.color;
+        return GetHsvColor( charutil::hash( worker.GetString( plot.name ) ), -10 );
     default:
         assert( false );
         return 0;
@@ -172,7 +175,7 @@ const char* FormatPlotValue( double val, PlotValueFormatting format )
         return RealToString( val );
         break;
     case PlotValueFormatting::Memory:
-        return MemSizeToString( val );
+        return MemSizeToString( (uint64_t)val );
         break;
     case PlotValueFormatting::Percentage:
         sprintf( buf, "%.2f%%", val );

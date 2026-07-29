@@ -45,7 +45,8 @@ bool View::DrawGpu( const TimelineContext& ctx, const GpuCtxData& gpu, int& offs
                 const auto begin = tlm.front().GpuStart();
                 const auto drift = GpuDrift( &gpu );
                 if( !singleThread ) offset += sstep;
-                const auto partDepth = DispatchGpuZoneLevel( tl, hover, pxns, int64_t( nspx ), wpos, offset, 0, gpu.thread, yMin, yMax, begin, drift );
+                auto partDepth = DispatchGpuZoneLevel( tl, hover, pxns, int64_t( nspx ), wpos, offset, 0, gpu.thread, yMin, yMax, begin, drift );
+
                 if( partDepth != 0 )
                 {
                     if( !singleThread )
@@ -72,7 +73,19 @@ bool View::DrawGpu( const TimelineContext& ctx, const GpuCtxData& gpu, int& offs
                 const auto begin = tl.front()->GpuStart();
                 const auto drift = GpuDrift( &gpu );
                 if( !singleThread ) offset += sstep;
-                const auto partDepth = DispatchGpuZoneLevel( tl, hover, pxns, int64_t( nspx ), wpos, offset, 0, gpu.thread, yMin, yMax, begin, drift );
+                auto partDepth = DispatchGpuZoneLevel( tl, hover, pxns, int64_t( nspx ), wpos, offset, 0, gpu.thread, yMin, yMax, begin, drift );
+
+                int32_t maxDepth = std::max(partDepth, td.second.maxDepth);
+                if ( GetViewData().stackCollapseMode == ViewData::CollapseMax )
+                {
+                    partDepth = maxDepth;
+                }
+                else if ( GetViewData().stackCollapseMode == ViewData::CollapseLimit )
+                {
+                    partDepth = std::min(GetViewData().stackCollapseClamp, maxDepth);
+                }
+                
+
                 if( partDepth != 0 )
                 {
                     if( !singleThread )
@@ -159,7 +172,7 @@ int View::DrawGpuZoneLevel( const V& vec, bool hover, double pxns, int64_t nspx,
         end = AdjustGpuTime( end, begin, drift );
         const auto zsz = std::max( ( end - start ) * pxns, pxns * 0.5 );
         if( zsz < MinVisSize )
-        {
+        {          
             const auto color = GetZoneColor( ev );
             const auto MinVisNs = MinVisSize * nspx;
             int num = 0;
@@ -237,6 +250,13 @@ int View::DrawGpuZoneLevel( const V& vec, bool hover, double pxns, int64_t nspx,
             const char* zoneName = m_worker.GetZoneName( ev );
             auto tsz = ImGui::CalcTextSize( zoneName );
 
+            // Add zone duration to the name
+            const auto ztime = m_worker.GetZoneEnd( ev ) - ev.GpuStart();
+            static char zoneNameTime[ 1024 ];
+            snprintf( zoneNameTime, 1024, "%s [%s]", zoneName, TimeToString( ztime ) );
+            zoneName = &zoneNameTime[ 0 ];
+            tsz = ImGui::CalcTextSize( zoneName );
+
             const auto pr0 = ( start - m_vd.zvStart ) * pxns;
             const auto pr1 = ( end - m_vd.zvStart ) * pxns;
             const auto px0 = std::max( pr0, -10.0 );
@@ -257,32 +277,39 @@ int View::DrawGpuZoneLevel( const V& vec, bool hover, double pxns, int64_t nspx,
             else
             {
                 const auto darkColor = DarkenColor( zoneColor.color );
-                DrawLine( draw, dpos + ImVec2( px0, offset + tsz.y ), dpos + ImVec2( px0, offset ), dpos + ImVec2( px1-1, offset ), zoneColor.accentColor, zoneColor.thickness );
-                DrawLine( draw, dpos + ImVec2( px0, offset + tsz.y ), dpos + ImVec2( px1-1, offset + tsz.y ), dpos + ImVec2( px1-1, offset ), darkColor, zoneColor.thickness );
+                draw->AddRect( wpos + ImVec2( px0, offset ), wpos + ImVec2( px1, offset + tsz.y ), darkColor, 0.f, -1, zoneColor.thickness );
             }
-            if( tsz.x < zsz )
+
+            const float zonePaddingPx = 10.0f;
+            const float minTextSizePx = 20.0f;
+            const float minZoneSizePx = ( zonePaddingPx * 2.0f ) + minTextSizePx;
+            if ( zsz > minZoneSizePx )
             {
-                const auto x = ( start - m_vd.zvStart ) * pxns + ( ( end - start ) * pxns - tsz.x ) / 2;
-                if( x < 0 || x > w - tsz.x )
+                ImVec2 vPadding = ImVec2( zonePaddingPx, 0.0f );
+                if ( tsz.x < ( zsz - ( zonePaddingPx * 2.0f ) ) )
                 {
-                    ImGui::PushClipRect( wpos + ImVec2( px0, offset ), wpos + ImVec2( px1, offset + tsz.y * 2 ), true );
-                    DrawTextContrast( draw, wpos + ImVec2( std::max( std::max( 0., px0 ), std::min( double( w - tsz.x ), x ) ), offset ), 0xFFFFFFFF, zoneName );
-                    ImGui::PopClipRect();
-                }
-                else if( ev.GpuStart() == ev.GpuEnd() )
-                {
-                    DrawTextContrast( draw, wpos + ImVec2( px0 + ( px1 - px0 - tsz.x ) * 0.5, offset ), 0xFFFFFFFF, zoneName );
+                    const auto x = ( start - m_vd.zvStart ) * pxns + ( ( end - start ) * pxns - tsz.x ) / 2;
+                    if ( x < zonePaddingPx || x > w - tsz.x )
+                    {
+                        ImGui::PushClipRect( wpos + vPadding + ImVec2( px0, offset ), wpos - vPadding + ImVec2( px1, offset + tsz.y * 2 ), true );
+                        DrawTextContrast( draw, wpos + ImVec2( std::max( std::max( double( zonePaddingPx ), px0 ), std::min( double( w - tsz.x ), x ) ), offset ), 0xFFFFFFFF, zoneName );
+                        ImGui::PopClipRect();
+                    }
+                    else if ( ev.GpuStart() == ev.GpuEnd() )
+                    {
+                        DrawTextContrast( draw, wpos + ImVec2( px0 + ( px1 - px0 - tsz.x ) * 0.5, offset ), 0xFFFFFFFF, zoneName );
+                    }
+                    else
+                    {
+                        DrawTextContrast( draw, wpos + ImVec2( x, offset ), 0xFFFFFFFF, zoneName );
+                    }
                 }
                 else
                 {
-                    DrawTextContrast( draw, wpos + ImVec2( x, offset ), 0xFFFFFFFF, zoneName );
+                    ImGui::PushClipRect( wpos + vPadding + ImVec2( px0, offset ), wpos - vPadding + ImVec2( px1, offset + tsz.y * 2 ), true );
+                    DrawTextContrast( draw, wpos + vPadding + ImVec2( ( start - m_vd.zvStart ) * pxns, offset ), 0xFFFFFFFF, zoneName );
+                    ImGui::PopClipRect();
                 }
-            }
-            else
-            {
-                ImGui::PushClipRect( wpos + ImVec2( px0, offset ), wpos + ImVec2( px1, offset + tsz.y * 2 ), true );
-                DrawTextContrast( draw, wpos + ImVec2( ( start - m_vd.zvStart ) * pxns, offset ), 0xFFFFFFFF, zoneName );
-                ImGui::PopClipRect();
             }
 
             if( hover && ImGui::IsMouseHoveringRect( wpos + ImVec2( px0, offset ), wpos + ImVec2( px1, offset + tsz.y + 1 ) ) )

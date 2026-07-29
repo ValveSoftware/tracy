@@ -135,10 +135,11 @@ bool View::FindMatchingZone( int prev0, int prev1, int flags )
     return found;
 }
 
-static std::vector<std::string> SplitLines( const char* data, size_t sz )
+static std::vector<std::string> SplitLines( const char* data, size_t sz_ )
 {
     std::vector<std::string> ret;
     auto txt = data;
+    ptrdiff_t sz = (ptrdiff_t)sz_;
     for(;;)
     {
         auto end = txt;
@@ -252,7 +253,8 @@ void View::DrawCompare()
                     auto f = std::shared_ptr<tracy::FileRead>( tracy::FileRead::Open( fn ) );
                     if( f )
                     {
-                        m_compare.loadThread = std::thread( [this, f] {
+						m_compare.secondFilename = fn;
+						m_compare.loadThread = std::thread( [this, f] {
                             try
                             {
                                 m_compare.second = std::make_unique<Worker>( *f, EventType::SourceCache );
@@ -305,6 +307,15 @@ void View::DrawCompare()
     if( desc0.empty() )
     {
         ImGui::TextUnformatted( m_worker.GetCaptureName().c_str() );
+		if ( !m_filename.empty() )
+		{
+			auto fptr = m_filename.c_str() + m_filename.size() - 1;
+			while ( fptr > m_filename.c_str() && *fptr != '/' && *fptr != '\\' ) fptr--;
+			if ( *fptr == '/' || *fptr == '\\' ) fptr++;
+			
+			ImGui::SameLine();
+			ImGui::TextDisabled( "(%s)", fptr );
+		}
     }
     else
     {
@@ -321,6 +332,15 @@ void View::DrawCompare()
     if( desc1.empty() )
     {
         ImGui::TextUnformatted( m_compare.second->GetCaptureName().c_str() );
+		if ( !m_compare.secondFilename.empty() )
+		{
+			auto fptr = m_compare.secondFilename.c_str() + m_compare.secondFilename.size() - 1;
+			while ( fptr > m_compare.secondFilename.c_str() && *fptr != '/' && *fptr != '\\' ) fptr--;
+			if ( *fptr == '/' || *fptr == '\\' ) fptr++;
+
+			ImGui::SameLine();
+			ImGui::TextDisabled( "(%s)", fptr );
+		}
     }
     else
     {
@@ -593,6 +613,7 @@ void View::DrawCompare()
                 if( prev0 != m_compare.selMatch[0] || prev1 != m_compare.selMatch[1] )
                 {
                     m_compare.ResetSelection();
+					m_compare.groupBy = FindZone::GroupBy::NoGrouping;
 
                     if( m_compare.link )
                     {
@@ -676,6 +697,7 @@ void View::DrawCompare()
                 if( prev0 != m_compare.selMatch[0] || prev1 != m_compare.selMatch[1] )
                 {
                     m_compare.ResetSelection();
+					m_compare.groupBy = FindZone::GroupBy::NoGrouping;
 
                     if( m_compare.link )
                     {
@@ -737,17 +759,7 @@ void View::DrawCompare()
                 zones0.ensure_sorted();
                 zones1.ensure_sorted();
 
-                tmin = std::min( zoneData0.min, zoneData1.min );
-                tmax = std::max( zoneData0.max, zoneData1.max );
-
-                size0 = zones0.size();
-                size1 = zones1.size();
-                total0 = zoneData0.total;
-                total1 = zoneData1.total;
-                sumSq0 = zoneData0.sumSq;
-                sumSq1 = zoneData1.sumSq;
-
-                const size_t zsz[2] = { size0, size1 };
+                const size_t zsz[2] = { zones0.size(), zones1.size() };
                 for( int k=0; k<2; k++ )
                 {
                     if( m_compare.sortedNum[k] != zsz[k] )
@@ -755,25 +767,109 @@ void View::DrawCompare()
                         auto& zones = k == 0 ? zones0 : zones1;
                         auto& vec = m_compare.sorted[k];
                         vec.reserve( zsz[k] );
+						const size_t sortedInitialSize = vec.size();
                         int64_t total = m_compare.total[k];
+						int64_t min = m_compare.min[k];
+						int64_t max = m_compare.max[k];
+						double sumSq = m_compare.sumSq[k];
                         size_t i;
+						constexpr uint64_t invalidGid = std::numeric_limits<uint64_t>::max() - 1;
+						uint64_t lastGid = invalidGid;
                         for( i=m_compare.sortedNum[k]; i<zsz[k]; i++ )
                         {
                             auto& zone = *zones[i].Zone();
-                            const auto t = zone.End() - zone.Start();
-                            vec.emplace_back( t );
-                            total += t;
+
+							uint64_t gid = 0;
+							auto worker = k == 0 ? &m_worker : m_compare.second.get();
+							switch ( m_compare.groupBy )
+							{
+								case FindZone::GroupBy::Thread:
+									gid = zones[ i ].Thread();
+									break;
+								case FindZone::GroupBy::UserText:
+								{
+									if ( !worker->HasZoneExtra( zone ) )
+									{
+										gid = std::numeric_limits<uint64_t>::max();
+									}
+									else
+									{
+										const auto &extra = worker->GetZoneExtra( zone );
+										gid = extra.text.Active() ? extra.text.Idx() : std::numeric_limits<uint64_t>::max();
+									}
+									break;
+								}
+								case FindZone::GroupBy::ZoneName:
+								{
+									if ( !worker->HasZoneExtra( zone ) )
+									{
+										gid = std::numeric_limits<uint64_t>::max();
+									}
+									else
+									{
+										const auto &extra = worker->GetZoneExtra( zone );
+										gid = extra.name.Active() ? extra.name.Idx() : std::numeric_limits<uint64_t>::max();
+									}
+									break;
+								}
+								case FindZone::GroupBy::Callstack:
+									gid = worker->GetZoneExtra( zone ).callstack.Val();
+									break;
+								case FindZone::GroupBy::Parent:
+								{
+									const auto parent = GetZoneParent( zone, worker->DecompressThread( zones[ i ].Thread() ), *worker );
+									if ( parent ) gid = uint64_t( uint16_t( parent->SrcLoc() ) );
+									break;
+								}
+								case FindZone::GroupBy::NoGrouping:
+									break;
+								default:
+									assert( false );
+									break;
+							}
+							if ( lastGid != gid )
+							{
+								lastGid = gid;
+								if ( std::find( m_compare.groups[ k ].begin(), m_compare.groups[ k ].end(), gid ) == m_compare.groups[ k ].end() )
+								{
+									m_compare.groups[ k ].push_back( gid );
+								}
+							}
+
+							if ( gid == m_compare.groups[k][ m_compare.selGroup[ k ] ] )
+							{
+								const auto t = zone.End() - zone.Start();
+								vec.emplace_back( t );
+								total += t;
+								sumSq += double( t ) * t;
+								min = std::min( min, t );
+								max = std::max( max, t );
+							}
                         }
-                        auto mid = vec.begin() + m_compare.sortedNum[k];
+                        auto mid = vec.begin() + sortedInitialSize;
                         pdqsort_branchless( mid, vec.end() );
                         std::inplace_merge( vec.begin(), mid, vec.end() );
 
-                        m_compare.average[k] = float( total ) / i;
-                        m_compare.median[k] = vec[i/2];
+						const size_t sortedFinalSize = vec.size();
+                        m_compare.average[k] = ( ( sortedFinalSize > 0 ) ? ( float( total ) / sortedFinalSize ) : 0.0f );
+                        m_compare.median[k] = ( sortedFinalSize > 0 ) ? vec[ sortedFinalSize / 2 ] : 0.0f;
                         m_compare.total[k] = total;
+						m_compare.sumSq[ k ] = sumSq;
+						m_compare.min[ k ] = min;
+						m_compare.max[ k ] = max;
                         m_compare.sortedNum[k] = i;
                     }
                 }
+
+				tmin = std::min( m_compare.min[0], m_compare.min[1]);
+				tmax = std::max( m_compare.max[0], m_compare.max[1]);
+
+				size0 = m_compare.sorted[0].size();
+				size1 = m_compare.sorted[1].size();
+				total0 = m_compare.total[0];
+				total1 = m_compare.total[1];
+				sumSq0 = m_compare.sumSq[0];
+				sumSq1 = m_compare.sumSq[1];
             }
             else
             {
@@ -1321,6 +1417,134 @@ void View::DrawCompare()
             }
             ImGui::TreePop();
         }
+
+		if ( m_compare.compareMode == 0 )	// zone compare
+		{
+			ImGui::Separator();
+			if ( ImGui::TreeNodeEx( "Filter options", ImGuiTreeNodeFlags_DefaultOpen ) )
+			{
+				bool groupChanged = false;
+				ImGui::PushStyleVar( ImGuiStyleVar_FramePadding, ImVec2( 0, 0 ) );
+				ImGui::TextUnformatted( "Group by:" );
+				ImGui::SameLine();
+				groupChanged |= ImGui::RadioButton( "Thread", ( int * ) ( &m_compare.groupBy ), ( int ) FindZone::GroupBy::Thread );
+				ImGui::SameLine();
+				groupChanged |= ImGui::RadioButton( "User text", ( int * ) ( &m_compare.groupBy ), ( int ) FindZone::GroupBy::UserText );
+				ImGui::SameLine();
+				groupChanged |= ImGui::RadioButton( "Zone name", ( int * ) ( &m_compare.groupBy ), ( int ) FindZone::GroupBy::ZoneName );
+				ImGui::SameLine();
+				groupChanged |= ImGui::RadioButton( "Call stacks", ( int * ) ( &m_compare.groupBy ), ( int ) FindZone::GroupBy::Callstack );
+				ImGui::SameLine();
+				groupChanged |= ImGui::RadioButton( "Parent", ( int * ) ( &m_compare.groupBy ), ( int ) FindZone::GroupBy::Parent );
+				ImGui::SameLine();
+				groupChanged |= ImGui::RadioButton( "No grouping", ( int * ) ( &m_compare.groupBy ), ( int ) FindZone::GroupBy::NoGrouping );
+				ImGui::PopStyleVar();
+				if ( groupChanged )
+				{
+					//m_findZone.selGroup = m_findZone.Unselected;
+					m_compare.ResetSelection();
+				}
+
+				ImGui::Columns( 2 );
+				TextColoredUnformatted( ImVec4( 0xDD / 255.f, 0xDD / 255.f, 0x22 / 255.f, 1.f ), ICON_FA_LEMON );
+				ImGui::SameLine();
+				ImGui::TextUnformatted( "This trace" );
+				ImGui::NextColumn();
+				TextColoredUnformatted( ImVec4( 0xDD / 255.f, 0x22 / 255.f, 0x22 / 255.f, 1.f ), ICON_FA_GEM );
+				ImGui::SameLine();
+				ImGui::TextUnformatted( "External trace" );
+
+
+				ImGui::Separator();
+
+				const int prevGroupSel[ 2 ] = { m_compare.selGroup[ 0 ], m_compare.selGroup[ 1 ] };
+				for ( int k = 0; k < 2; k++ )
+				{
+					const Vector<uint64_t> &groups = m_compare.groups[ k ];
+					auto worker = k == 0 ? &m_worker : m_compare.second.get();
+
+					ImGui::NextColumn();
+
+					const int prevSel = m_compare.selGroup[ k ];
+					int idx = 0;
+					for ( auto gid : groups )
+					{
+						const char *hdrString = "TEST";
+						switch ( m_compare.groupBy )
+						{
+							case FindZone::GroupBy::Thread:
+							{
+								const auto tid = worker->DecompressThread( gid );
+								hdrString = worker->GetThreadName( tid );
+								break;
+							}
+							case FindZone::GroupBy::UserText:
+								hdrString = gid == std::numeric_limits<uint64_t>::max() ? "<No user text>" : worker->GetString( StringIdx( gid ) );
+								break;
+							case FindZone::GroupBy::ZoneName:
+								if ( gid == std::numeric_limits<uint64_t>::max() )
+								{
+									auto &srcloc = worker->GetSourceLocation( m_compare.match[ k ][ m_compare.selMatch[ k ] ] );
+									hdrString = worker->GetString( srcloc.name.active ? srcloc.name : srcloc.function );
+								}
+								else
+								{
+									hdrString = worker->GetString( StringIdx( gid ) );
+								}
+								break;
+							case FindZone::GroupBy::Callstack:
+								if ( gid == 0 )
+								{
+									hdrString = "<No callstack>";
+								}
+								else
+								{
+									auto &callstack = worker->GetCallstack( gid );
+									auto &frameData = *worker->GetCallstackFrame( *callstack.begin() );
+									hdrString = worker->GetString( frameData.data[ frameData.size - 1 ].name );
+								}
+								break;
+							case FindZone::GroupBy::Parent:
+								if ( gid == 0 )
+								{
+									hdrString = "<no parent>";
+								}
+								else
+								{
+									auto &srcloc = worker->GetSourceLocation( int16_t( gid ) );
+									hdrString = worker->GetString( srcloc.name.active ? srcloc.name : srcloc.function );
+								}
+								break;
+							case FindZone::GroupBy::NoGrouping:
+								hdrString = "<All Zones>";
+								break;
+							default:
+								hdrString = nullptr;
+								assert( false );
+								break;
+						}
+
+						ImGui::PushID( k == 0 ? ( -1 - idx ) : idx );
+						ImGui::RadioButton( hdrString, &m_compare.selGroup[ k ], idx++ );
+						ImGui::PopID();
+					}
+				}
+
+				if ( prevGroupSel[ 0 ] != m_compare.selGroup[ 0 ] || prevGroupSel[ 1 ] != m_compare.selGroup[ 1 ] )
+				{
+					const int currentSel[ 2 ] = { m_compare.selGroup[ 0 ], m_compare.selGroup[ 1 ] };
+
+					m_compare.ResetSelection();	// will reset m_compare.selGroup[ k ] !
+
+					m_compare.selGroup[ 0 ] = currentSel[ 0 ];
+					m_compare.selGroup[ 1 ] = currentSel[ 1 ];
+				}
+
+				ImGui::EndColumns();
+
+				ImGui::TreePop();
+			}
+		}
     }
 
     ImGui::EndChild();

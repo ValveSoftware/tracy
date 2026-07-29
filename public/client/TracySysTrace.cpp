@@ -2,6 +2,7 @@
 #include "TracyStringHelpers.hpp"
 #include "TracySysTrace.hpp"
 #include "../common/TracySystem.hpp"
+#include "tier0/index_helpers.h"
 
 #ifdef TRACY_HAS_SYSTEM_TRACING
 
@@ -43,6 +44,32 @@ static int GetSamplingPeriod()
 
 #  if defined _WIN32
 
+//
+// Useful resources on how to get access to hardware performance counters on Windows through ETW:
+// 
+// * Collecting hardware performance through ETW (using wpr / xperf)
+//		* https://learn.microsoft.com/en-us/windows-hardware/test/wpt/recording-pmu-events
+//		* https://devblogs.microsoft.com/performance-diagnostics/recording-hardware-performance-pmu-events-with-complete-examples/
+//		* wpr -pmcsources
+//		* https://github.com/Siemens-Healthineers/ETWAnalyzer/blob/main/ETWAnalyzer/Documentation/DumpPMCCommand.md
+//		* https://learn.microsoft.com/en-us/archive/blogs/vancem/perfview-hard-core-cpu-investigations-using-cpu-counters-on-windows-10
+// 
+// * Enabling PerfInfo kernel provider - PERFINFO_GROUPMASK
+//		* https://geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/ntwmi/perfinfo_groupmask.htm
+//		* Look for KernelKeywords.PMCProfile in https://github.com/microsoft/perfview/blob/main/src/TraceEvent/ETWKernelControl.cs
+//		* https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/ntos/ke/kprofile.htm
+//		* https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/api/ntwmi/wmi_trace_packet/hookid.htm
+//		* https://learn.microsoft.com/en-us/windows/win32/etw/system-providers
+// 
+// * Code samples (using ETW api)
+//		* krabsetw - c++ lib interacting with ETW
+//			https://github.com/microsoft/krabsetw/tree/master
+//		* attaching performance counter to other etw events (such as context switch)
+//			https://gist.github.com/mmozeiko/bd5923bcd9d20b5b9946691932ec95fa?ts=4
+//		* interrupt based sampling on performance counter overflow
+//			https://gist.github.com/pr8x/3ec386865b1d613366faf23bd7b17221
+// 
+
 #    ifndef NOMINMAX
 #      define NOMINMAX
 #    endif
@@ -61,6 +88,7 @@ static int GetSamplingPeriod()
 #    include "../common/TracySystem.hpp"
 #    include "TracyProfiler.hpp"
 #    include "TracyThread.hpp"
+#    include "TracySysTraceWin32HwCounters.hpp"
 
 namespace tracy
 {
@@ -68,6 +96,8 @@ namespace tracy
 static const GUID PerfInfoGuid = { 0xce1dbfb4, 0x137e, 0x4da6, { 0x87, 0xb0, 0x3f, 0x59, 0xaa, 0x10, 0x2c, 0xbc } };
 static const GUID DxgKrnlGuid  = { 0x802ec45a, 0x1e99, 0x4b83, { 0x99, 0x20, 0x87, 0xc9, 0x82, 0x77, 0xba, 0x9d } };
 static const GUID ThreadV2Guid = { 0x3d6fa8d1, 0xfe05, 0x11d0, { 0x9d, 0xda, 0x00, 0xc0, 0x4f, 0xd7, 0xba, 0x7c } };
+// 'Valve.Source.Tracy' provider guid
+static const GUID ValveSourceTracyGuid = { 0x43e1dc57, 0x5142, 0x5b39, { 0xd9, 0x2d, 0x80, 0x4c, 0x5a, 0xb4, 0xf1, 0xbb } };
 
 
 static TRACEHANDLE s_traceHandle;
@@ -140,6 +170,21 @@ struct VSyncInfo
     uint64_t    flipFenceId;
 };
 
+struct PerfInfoPmcSampleInformation
+{
+    PVOID InstructionPointer;
+    ULONG ThreadId;
+    USHORT ProfileSource;
+    USHORT Reserved;
+};
+
+struct PerfInfoSampleProfileConfig
+{
+    ULONG Source;
+    ULONG NewInterval;
+    ULONG OldInterval;
+};
+
 extern "C" typedef NTSTATUS (WINAPI *t_NtQueryInformationThread)( HANDLE, THREADINFOCLASS, PVOID, ULONG, PULONG );
 extern "C" typedef BOOL (WINAPI *t_EnumProcessModules)( HANDLE, HMODULE*, DWORD, LPDWORD );
 extern "C" typedef BOOL (WINAPI *t_GetModuleInformation)( HANDLE, HMODULE, LPMODULEINFO, DWORD );
@@ -152,6 +197,77 @@ t_GetModuleInformation _GetModuleInformation = (t_GetModuleInformation)GetProcAd
 t_GetModuleBaseNameA _GetModuleBaseNameA = (t_GetModuleBaseNameA)GetProcAddress( GetModuleHandleA( "kernel32.dll" ), "K32GetModuleBaseNameA" );
 
 static t_GetThreadDescription _GetThreadDescription = 0;
+
+#define PERF_MASK_INDEX ( 0xe0000000 )
+#define PERF_MASK_GROUP ( ~PERF_MASK_INDEX )
+#define PERF_NUM_MASKS 8
+
+typedef ULONG PERFINFO_MASK;
+typedef struct _PERFINFO_GROUPMASK
+{
+    ULONG Masks[PERF_NUM_MASKS];
+} PERFINFO_GROUPMASK, *PPERFINFO_GROUPMASK;
+
+#define PERF_GET_MASK_INDEX( GM ) ( ( ( GM ) & PERF_MASK_INDEX ) >> 29 )
+#define PERF_GET_MASK_GROUP( GM ) ( ( GM ) & PERF_MASK_GROUP )
+#define PERFINFO_OR_GROUP_WITH_GROUPMASK( Group, pGroupMask )                                                  \
+            ( pGroupMask )->Masks[PERF_GET_MASK_INDEX( Group )] |= PERF_GET_MASK_GROUP( Group );
+
+#define PERF_PMC_PROFILE        0x20000400
+
+EXTERN_C ULONG WMIAPI TraceQueryInformation ( _In_ TRACEHANDLE SessionHandle, _In_ TRACE_INFO_CLASS InformationClass, _Out_writes_bytes_(InformationLength) PVOID TraceInformation, _In_ ULONG InformationLength, _Out_opt_ PULONG ReturnLength );
+
+// Mapping from HwCustomCounterId_t to tracy::QueueType
+// Using QueueType::NUM_TYPES is the mapping is not valid
+static const tracy::QueueType s_mappingCounterToQueueType[ IndexHelpers::IndexTypeToRawInteger( HwCustomCounterId_t::VALVE_COUNTER_MAX_COUNT ) ] =
+{
+    QueueType::HwSampleCpuCycle,            // VALVE_COUNTER_CPU_CYCLES,
+    QueueType::HwSampleInstructionRetired,  // VALVE_COUNTER_INSTRUCTION,
+    QueueType::HwSampleBranchRetired,       // VALVE_COUNTER_BRANCH,
+    QueueType::HwSampleBranchMiss,          // VALVE_COUNTER_BRANCH_MISPREDICT,
+    QueueType::HwSampleCacheReference,      // VALVE_COUNTER_L1_CACHE_ACCESS,
+    QueueType::HwSampleCacheMiss,           // VALVE_COUNTER_L1_CACHE_MISS,
+    QueueType::HwSampleCacheReference,      // VALVE_COUNTER_L2_CACHE_ACCESS,
+    QueueType::HwSampleCacheMiss,           // VALVE_COUNTER_L2_CACHE_MISS,
+    
+    QueueType::NUM_TYPES, // VALVE_COUNTER_CUSTOM_00,
+    QueueType::NUM_TYPES, // VALVE_COUNTER_CUSTOM_01,
+    QueueType::NUM_TYPES, // VALVE_COUNTER_CUSTOM_02,
+    QueueType::NUM_TYPES, // VALVE_COUNTER_CUSTOM_03,
+    QueueType::NUM_TYPES, // VALVE_COUNTER_CUSTOM_04,
+    QueueType::NUM_TYPES, // VALVE_COUNTER_CUSTOM_05,
+    QueueType::NUM_TYPES, // VALVE_COUNTER_CUSTOM_06,
+    QueueType::NUM_TYPES, // VALVE_COUNTER_CUSTOM_07,
+};
+
+
+static void ReadPcmDataFromExtendedData( PEVENT_RECORD record )
+{
+    if ( !( record->EventHeader.Flags & EVENT_HEADER_FLAG_EXTENDED_INFO ) )
+        return;
+
+    for ( int nExtended = 0; nExtended < record->ExtendedDataCount; ++nExtended )
+    {
+        const EVENT_HEADER_EXTENDED_DATA_ITEM *pExtendedData = record->ExtendedData + nExtended;
+        if ( pExtendedData->ExtType != EVENT_HEADER_EXT_TYPE_PMC_COUNTERS )
+            continue;
+
+        // Currently only expecting a single counter ('cache miss') to be attached to the event
+        int nPmcDataCount = pExtendedData->DataSize / sizeof( ULONG64 );
+        if ( nPmcDataCount != 1 )
+            continue;
+
+        EVENT_EXTENDED_ITEM_PMC_COUNTERS *pPmcData = (EVENT_EXTENDED_ITEM_PMC_COUNTERS *)pExtendedData->DataPtr;
+        for ( int nCounter = 0; nCounter < nPmcDataCount; ++nCounter )
+        {   
+            QueueItem *item = Profiler::QueueSys( QueueType::HwCounter );
+            MemWrite( &item->hwCounter.time, record->EventHeader.TimeStamp.QuadPart );
+            MemWrite( &item->hwCounter.count, pPmcData->Counter[ nCounter ] );
+            MemWrite( &item->hwCounter.cpu, record->BufferContext.ProcessorNumber );
+            Profiler::QueueSysFinish();
+        }
+    }
+}
 
 
 void WINAPI EventRecordCallback( PEVENT_RECORD record )
@@ -168,7 +284,7 @@ void WINAPI EventRecordCallback( PEVENT_RECORD record )
         {
             const auto cswitch = (const CSwitch*)record->UserData;
 
-            TracyLfqPrepare( QueueType::ContextSwitch );
+            QueueItem *item = Profiler::QueueSys( QueueType::ContextSwitch );
             MemWrite( &item->contextSwitch.time, hdr.TimeStamp.QuadPart );
             MemWrite( &item->contextSwitch.oldThread, cswitch->oldThreadId );
             MemWrite( &item->contextSwitch.newThread, cswitch->newThreadId );
@@ -178,19 +294,21 @@ void WINAPI EventRecordCallback( PEVENT_RECORD record )
             MemWrite( &item->contextSwitch.newThreadPriority, cswitch->newThreadPriority );
             MemWrite( &item->contextSwitch.oldThreadPriority, cswitch->oldThreadPriority );
             MemWrite( &item->contextSwitch.previousCState, cswitch->previousCState );
-            TracyLfqCommit;
+            Profiler::QueueSysFinish();
+
+            ReadPcmDataFromExtendedData( record );
         }
         else if( hdr.EventDescriptor.Opcode == 50 )
         {
             const auto rt = (const ReadyThread*)record->UserData;
 
-            TracyLfqPrepare( QueueType::ThreadWakeup );
+            QueueItem *item = Profiler::QueueSys( QueueType::ThreadWakeup );
             MemWrite( &item->threadWakeup.time, hdr.TimeStamp.QuadPart );
             MemWrite( &item->threadWakeup.cpu, record->BufferContext.ProcessorNumber );
             MemWrite( &item->threadWakeup.thread, rt->threadId );
             MemWrite( &item->threadWakeup.adjustReason, rt->adjustReason );
             MemWrite( &item->threadWakeup.adjustIncrement, rt->adjustIncrement );
-            TracyLfqCommit;
+            Profiler::QueueSysFinish();
         }
         else if( hdr.EventDescriptor.Opcode == 1 || hdr.EventDescriptor.Opcode == 3 )
         {
@@ -199,10 +317,10 @@ void WINAPI EventRecordCallback( PEVENT_RECORD record )
             uint64_t tid = tt->threadId;
             if( tid == 0 ) return;
             uint64_t pid = tt->processId;
-            TracyLfqPrepare( QueueType::TidToPid );
+            QueueItem *item = Profiler::QueueSys( QueueType::TidToPid );
             MemWrite( &item->tidToPid.tid, tid );
             MemWrite( &item->tidToPid.pid, pid );
-            TracyLfqCommit;
+            Profiler::QueueSysFinish();
         }
         break;
     case 0xdef2fe46:    // StackWalk Guid
@@ -217,14 +335,49 @@ void WINAPI EventRecordCallback( PEVENT_RECORD record )
                     auto trace = (uint64_t*)tracy_malloc( ( 1 + sz ) * sizeof( uint64_t ) );
                     memcpy( trace, &sz, sizeof( uint64_t ) );
                     memcpy( trace+1, sw->stack, sizeof( uint64_t ) * sz );
-                    TracyLfqPrepare( QueueType::CallstackSample );
+                    QueueItem *item = Profiler::QueueSys( QueueType::CallstackSample );
                     MemWrite( &item->callstackSampleFat.time, sw->eventTimeStamp );
                     MemWrite( &item->callstackSampleFat.thread, sw->stackThread );
                     MemWrite( &item->callstackSampleFat.ptr, (uint64_t)trace );
-                    TracyLfqCommit;
+                    Profiler::QueueSysFinish();
                 }
             }
         }
+        break;
+    case 0xce1dbfb4: // PerfInfo guid
+        if( hdr.EventDescriptor.Opcode == 47 )			// PERFINFO_LOG_TYPE_PMC_INTERRUPT
+        {
+            const auto pmcEvent = (const PerfInfoPmcSampleInformation*)record->UserData;
+            const HwCustomCounterId_t *pCounterSamplingList = SysTraceGetCounterList_SamplingMode();
+            for ( int nCounter = 0; nCounter < HW_COUNTER_SAMPLING_MAX_COUNT; ++nCounter )
+            {
+                HwCustomCounterId_t counterId = pCounterSamplingList[ nCounter ];
+                if ( (pmcEvent->ProfileSource != 0 ) && ( pmcEvent->ProfileSource == SysTraceGetCounterETWProfileSourceId( counterId ) ) )
+                {
+                    QueueType queueType = s_mappingCounterToQueueType[ IndexHelpers::IndexTypeToRawInteger( counterId ) ];
+                    if ( queueType != QueueType::NUM_TYPES )
+                    {
+                        QueueItem *item = Profiler::QueueSys( queueType );
+                        MemWrite( &item->hwSample.ip, pmcEvent->InstructionPointer );
+                        MemWrite( &item->hwSample.time, hdr.TimeStamp.QuadPart );
+                        Profiler::QueueSysFinish();
+                    }
+                }
+            }
+        }
+        else if ( hdr.EventDescriptor.Opcode == 46 || hdr.EventDescriptor.Opcode == 51 || hdr.EventDescriptor.Opcode == 52 )	// SampledProfile / SysCallEnter / SysCallExit events
+        {
+            ReadPcmDataFromExtendedData( record );
+        }
+        /*	
+        // Kept here for reference (should be moved at the start of the function 
+        // to avoid the early out if Tracy is not connected
+        else if ( hdr.EventDescriptor.Opcode == 73 )	// PERFINFO_LOG_TYPE_SAMPLED_PROFILE_DC_START
+        {
+	        // Handling change of interval
+	        const auto pmcConfig = ( const PerfInfoSampleProfileConfig * ) record->UserData;
+        }
+        */
         break;
     default:
         break;
@@ -238,20 +391,19 @@ void WINAPI EventRecordCallbackVsync( PEVENT_RECORD record )
 #endif
 
     const auto& hdr = record->EventHeader;
-    assert( hdr.ProviderId.Data1 == 0x802EC45A );
-    assert( hdr.EventDescriptor.Id == 0x0011 );
+    if ( ( hdr.ProviderId.Data1 == 0x802EC45A ) && ( hdr.EventDescriptor.Id == 0x0011 ) )
+    {
+        const auto vs = (const VSyncInfo*)record->UserData;
 
-    const auto vs = (const VSyncInfo*)record->UserData;
-
-    TracyLfqPrepare( QueueType::FrameVsync );
-    MemWrite( &item->frameVsync.time, hdr.TimeStamp.QuadPart );
-    MemWrite( &item->frameVsync.id, vs->vidPnTargetId );
-    TracyLfqCommit;
+        QueueItem *item = Profiler::QueueSys( QueueType::FrameVsync );
+        MemWrite( &item->frameVsync.time, hdr.TimeStamp.QuadPart );
+        MemWrite( &item->frameVsync.id, vs->vidPnTargetId );
+        Profiler::QueueSysFinish();
+    }
 }
 
-static void SetupVsync()
+static void SetupUserModeTrace()
 {
-#if _WIN32_WINNT >= _WIN32_WINNT_WINBLUE && !defined(__MINGW32__)
     const auto psz = sizeof( EVENT_TRACE_PROPERTIES ) + MAX_PATH;
     s_propVsync = (EVENT_TRACE_PROPERTIES*)tracy_malloc( psz );
     memset( s_propVsync, 0, sizeof( EVENT_TRACE_PROPERTIES ) );
@@ -268,6 +420,7 @@ static void SetupVsync()
     auto backup = tracy_malloc( psz );
     memcpy( backup, s_propVsync, psz );
 
+    // Stops any existing 'TracyVsync' session
     const auto controlStatus = ControlTraceA( 0, "TracyVsync", s_propVsync, EVENT_TRACE_CONTROL_STOP );
     if( controlStatus != ERROR_SUCCESS && controlStatus != ERROR_WMI_INSTANCE_NOT_FOUND )
     {
@@ -279,6 +432,13 @@ static void SetupVsync()
     memcpy( s_propVsync, backup, psz );
     tracy_free( backup );
 
+    uint32_t options = GetProfiler().GetOptions();
+    if ( !( options & ( Profiler::Options_Vsync | Profiler::Options_HardwareEvents ) ) )
+    {
+        tracy_free( s_propVsync );
+        return;
+    }
+
     const auto startStatus = StartTraceA( &s_traceHandleVsync, "TracyVsync", s_propVsync );
     if( startStatus != ERROR_SUCCESS )
     {
@@ -286,28 +446,44 @@ static void SetupVsync()
         return;
     }
 
-    EVENT_FILTER_EVENT_ID fe = {};
-    fe.FilterIn = TRUE;
-    fe.Count = 1;
-    fe.Events[0] = 0x0011;  // VSyncDPC_Info
-
-    EVENT_FILTER_DESCRIPTOR desc = {};
-    desc.Ptr = (ULONGLONG)&fe;
-    desc.Size = sizeof( fe );
-    desc.Type = EVENT_FILTER_TYPE_EVENT_ID;
-
-    ENABLE_TRACE_PARAMETERS params = {};
-    params.Version = ENABLE_TRACE_PARAMETERS_VERSION_2;
-    params.EnableProperty = EVENT_ENABLE_PROPERTY_IGNORE_KEYWORD_0;
-    params.SourceId = s_propVsync->Wnode.Guid;
-    params.EnableFilterDesc = &desc;
-    params.FilterDescCount = 1;
-
-    uint64_t mask = 0x4000000000000001;   // Microsoft_Windows_DxgKrnl_Performance | Base
-    if( EnableTraceEx2( s_traceHandleVsync, &DxgKrnlGuid, EVENT_CONTROL_CODE_ENABLE_PROVIDER, TRACE_LEVEL_INFORMATION, mask, mask, 0, &params ) != ERROR_SUCCESS )
+#ifndef TRACY_NO_VSYNC_CAPTURE
+    if ( options & Profiler::Options_Vsync )
     {
-        tracy_free( s_propVsync );
-        return;
+        EVENT_FILTER_EVENT_ID fe = {};
+        fe.FilterIn = TRUE;
+        fe.Count = 1;
+        fe.Events[0] = 0x0011;  // VSyncDPC_Info
+
+        EVENT_FILTER_DESCRIPTOR desc = {};
+        desc.Ptr = (ULONGLONG)&fe;
+        desc.Size = sizeof( fe );
+        desc.Type = EVENT_FILTER_TYPE_EVENT_ID;
+
+        ENABLE_TRACE_PARAMETERS params = {};
+        params.Version = ENABLE_TRACE_PARAMETERS_VERSION_2;
+        params.EnableProperty = EVENT_ENABLE_PROPERTY_IGNORE_KEYWORD_0;
+        params.SourceId = s_propVsync->Wnode.Guid;
+        params.EnableFilterDesc = &desc;
+        params.FilterDescCount = 1;
+
+        uint64_t mask = 0x4000000000000001;   // Microsoft_Windows_DxgKrnl_Performance | Base
+        if( EnableTraceEx2( s_traceHandleVsync, &DxgKrnlGuid, EVENT_CONTROL_CODE_ENABLE_PROVIDER, TRACE_LEVEL_INFORMATION, mask, mask, 0, &params ) != ERROR_SUCCESS )
+        {
+            tracy_free( s_propVsync );
+            return;
+        }
+    }
+#endif
+
+    if ( options & Profiler::Options_HardwareEvents )
+    {
+        // Enable 'Valve.Source.Tracy' provider.
+        // Mechanism to trigger a system call (and therefore read pcm data attached to sys call event) via ETW TraceLogging API.
+        if ( EnableTraceEx2( s_traceHandleVsync, &ValveSourceTracyGuid, EVENT_CONTROL_CODE_ENABLE_PROVIDER, TRACE_LEVEL_INFORMATION, 1, 0, 0, NULL ) != ERROR_SUCCESS )
+        {
+            tracy_free( s_propVsync );
+            return;
+        }
     }
 
     char loggerName[MAX_PATH];
@@ -333,7 +509,6 @@ static void SetupVsync()
         SetThreadName( "Tracy Vsync" );
         ProcessTrace( &s_traceHandleVsync2, 1, nullptr, nullptr );
     }, nullptr );
-#endif
 }
 
 static int GetSamplingInterval()
@@ -343,6 +518,12 @@ static int GetSamplingInterval()
 
 bool SysTraceStart( int64_t& samplingPeriod )
 {
+    uint32_t options = GetProfiler().GetOptions();
+    if ( options == Profiler::Options_None )
+    {
+        return false;
+    }
+
     if( !_GetThreadDescription ) _GetThreadDescription = (t_GetThreadDescription)GetProcAddress( GetModuleHandleA( "kernel32.dll" ), "GetThreadDescription" );
 
     s_pid = GetCurrentProcessId();
@@ -362,13 +543,13 @@ bool SysTraceStart( int64_t& samplingPeriod )
 
     HANDLE pt;
     if( OpenProcessToken( GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &pt ) == 0 ) return false;
-    const auto adjust = AdjustTokenPrivileges( pt, FALSE, &priv, 0, nullptr, nullptr );
+    const auto adjust = AdjustTokenPrivileges( pt, FALSE, &priv, sizeof( TOKEN_PRIVILEGES ), nullptr, nullptr );
     CloseHandle( pt );
     if( adjust == 0 ) return false;
     const auto status = GetLastError();
     if( status != ERROR_SUCCESS ) return false;
 
-    if( isOs64Bit )
+    if( ( options & Profiler::Options_Sampling ) && isOs64Bit )
     {
         TRACE_PROFILE_INTERVAL interval = {};
         interval.Interval = GetSamplingInterval();
@@ -377,15 +558,63 @@ bool SysTraceStart( int64_t& samplingPeriod )
         samplingPeriod = GetSamplingPeriod();
     }
 
+	if ( ( options & ( Profiler::Options_HardwareSampling | Profiler::Options_HardwareEvents ) ) && isOs64Bit )
+	{
+        SysTraceConfigureEtwCustomHwCounters();
+
+        if ( options & Profiler::Options_HardwareSampling )
+        {
+            // Enable sampling on PMC Overflow
+            ULONG sourceInfos[ IndexHelpers::IndexTypeToRawInteger( HwCustomCounterId_t::VALVE_COUNTER_MAX_COUNT ) ];
+            int nSourcesCount = 0;
+            
+            const HwCustomCounterId_t *pCounterSamplingList = SysTraceGetCounterList_SamplingMode();
+            for ( int nCounter = 0; nCounter < HW_COUNTER_SAMPLING_MAX_COUNT; ++nCounter )
+            {
+                ULONG sourceId = SysTraceGetCounterETWProfileSourceId( pCounterSamplingList[nCounter] );
+                if ( sourceId != 0 )
+                {
+                    sourceInfos[ nSourcesCount ] = sourceId;
+
+                    TRACE_PROFILE_INTERVAL interval = {};
+                    interval.Source = sourceId;
+                    interval.Interval = 65536;
+                    TraceSetInformation( 0, TraceSampledProfileIntervalInfo, &interval, sizeof( interval ) );
+
+                    nSourcesCount++;
+                }
+            }
+            if ( nSourcesCount > 0 )
+            {
+                TraceSetInformation( 0, TraceProfileSourceConfigInfo, &sourceInfos, nSourcesCount * sizeof( ULONG ) );
+            }
+        }
+    }
+
     const auto psz = sizeof( EVENT_TRACE_PROPERTIES ) + sizeof( KERNEL_LOGGER_NAME );
     s_prop = (EVENT_TRACE_PROPERTIES*)tracy_malloc( psz );
     memset( s_prop, 0, sizeof( EVENT_TRACE_PROPERTIES ) );
     ULONG flags = 0;
 #ifndef TRACY_NO_CONTEXT_SWITCH
-    flags = EVENT_TRACE_FLAG_CSWITCH | EVENT_TRACE_FLAG_DISPATCHER | EVENT_TRACE_FLAG_THREAD;
+    if ( options & Profiler::Options_ContextSwitches )
+    {
+        flags = EVENT_TRACE_FLAG_CSWITCH | EVENT_TRACE_FLAG_DISPATCHER | EVENT_TRACE_FLAG_THREAD;
+    }
 #endif
+    if ( isOs64Bit && ( options & Profiler::Options_HardwareSampling ) )
+    {
+        flags |= EVENT_TRACE_FLAG_PROFILE;
+    }
+    if ( isOs64Bit && ( options & Profiler::Options_HardwareEvents ) )
+    {
+        // Enable system call events in order to attach pmc data to them
+        flags |= EVENT_TRACE_FLAG_SYSTEMCALL;
+    }
 #ifndef TRACY_NO_SAMPLING
-    if( isOs64Bit ) flags |= EVENT_TRACE_FLAG_PROFILE;
+    if ( options & Profiler::Options_Sampling )
+    {
+        if( isOs64Bit ) flags |= EVENT_TRACE_FLAG_PROFILE;
+    }
 #endif
     s_prop->EnableFlags = flags;
     s_prop->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
@@ -425,13 +654,15 @@ bool SysTraceStart( int64_t& samplingPeriod )
     }
 
 #ifndef TRACY_NO_SAMPLING
-    if( isOs64Bit )
+    if ( ( options & Profiler::Options_Sampling ) && isOs64Bit )
     {
-        CLASSIC_EVENT_ID stackId[2] = {};
+        CLASSIC_EVENT_ID stackId[3] = {};
         stackId[0].EventGuid = PerfInfoGuid;
-        stackId[0].Type = 46;
+        stackId[0].Type = 46;	// SampledProfile event
         stackId[1].EventGuid = ThreadV2Guid;
-        stackId[1].Type = 36;
+        stackId[1].Type = 36;	// CSwitch event
+		stackId[2].EventGuid = ThreadV2Guid;
+		stackId[2].Type = 50;	// ReadyThread event
         const auto stackStatus = TraceSetInformation( s_traceHandle, TraceStackTracingInfo, &stackId, sizeof( stackId ) );
         if( stackStatus != ERROR_SUCCESS )
         {
@@ -440,6 +671,74 @@ bool SysTraceStart( int64_t& samplingPeriod )
         }
     }
 #endif
+
+	// Enable PMC_PROFILE event tracing
+	// Note that PMC_PROFILE event tracing can't be enabled via 'EnableFlags' (of EVENT_TRACE_PROPERTIES)
+	// and you need to call TraceSetInformation with an extended PERFINFO_GROUPMASK
+	if ( isOs64Bit && ( options & Profiler::Options_HardwareSampling ) )
+	{
+		PERFINFO_GROUPMASK groupMask;
+		TraceQueryInformation( s_traceHandle, TraceSystemTraceEnableFlagsInfo, &groupMask, sizeof( PERFINFO_GROUPMASK ), nullptr );
+
+		PERFINFO_MASK pmcMask = PERF_PMC_PROFILE;
+		PERFINFO_OR_GROUP_WITH_GROUPMASK( pmcMask, &groupMask );
+
+		const auto perfInfoStatus = TraceSetInformation( s_traceHandle, TraceSystemTraceEnableFlagsInfo, &groupMask, sizeof( PERFINFO_GROUPMASK ) );
+		if ( perfInfoStatus != ERROR_SUCCESS )
+		{
+			CloseTrace( s_traceHandle );
+			tracy_free( s_prop );
+			return false;
+		}
+	}
+
+	// Attach hardware performance counters to context switch and system call events
+	if ( isOs64Bit && ( options & Profiler::Options_HardwareEvents ) )
+	{
+        // For now only select 'cache miss' counter to be collected on system events
+        // We may decide to collect more PMC counters in the future
+        ULONG sourceInfos[ IndexHelpers::IndexTypeToRawInteger( HwCustomCounterId_t::VALVE_COUNTER_MAX_COUNT ) ];
+        int nSourcesCount = 0;
+        const HwCustomCounterId_t *pCounterEventsList = SysTraceGetCounterList_EventsMode();
+        for ( int nCounter = 0; nCounter < HW_COUNTER_EVENTS_MAX_COUNT; ++nCounter )
+        {
+            ULONG nProfileSourceId = SysTraceGetCounterETWProfileSourceId( pCounterEventsList[nCounter] );
+            if ( ( nProfileSourceId != 0 ) && nSourcesCount < ( sizeof( sourceInfos ) / sizeof( sourceInfos[0] ) ) )
+            {
+                sourceInfos[ nSourcesCount ] = nProfileSourceId;
+                nSourcesCount++;
+            }
+        }
+        
+        if ( nSourcesCount > 0 )
+		{
+			const auto counterListStatus = TraceSetInformation( s_traceHandle, TracePmcCounterListInfo, &sourceInfos, nSourcesCount * sizeof( ULONG ) );
+			if ( counterListStatus != ERROR_SUCCESS )
+			{
+                CloseTrace( s_traceHandle );
+                tracy_free( s_prop );
+                return false;
+			}
+
+            CLASSIC_EVENT_ID EventId[ 3 ] = {};
+            EventId[ 0 ].EventGuid = ThreadV2Guid;
+            EventId[ 0 ].Type = 36;	// CSwitch event
+            EventId[ 1 ].EventGuid = PerfInfoGuid;
+            EventId[ 1 ].Type = 51;	// SysCallEnter event
+            EventId[ 2 ].EventGuid = PerfInfoGuid;
+            EventId[ 2 ].Type = 52;	// SysCallExit event
+
+			const auto eventListStatus = TraceSetInformation( s_traceHandle, TracePmcEventListInfo, &EventId, sizeof( EventId ) );
+			if ( eventListStatus != ERROR_SUCCESS )
+			{
+                CloseTrace( s_traceHandle );
+                tracy_free( s_prop );
+                return false;
+			}
+		}
+	}
+
+	// Opens ETW trace
 
 #ifdef UNICODE
     WCHAR KernelLoggerName[sizeof( KERNEL_LOGGER_NAME )];
@@ -460,9 +759,8 @@ bool SysTraceStart( int64_t& samplingPeriod )
         return false;
     }
 
-#ifndef TRACY_NO_VSYNC_CAPTURE
-    SetupVsync();
-#endif
+    // Start 'user mode' session to handle vsync events and events provided by 'Valve.Source.Tracy' provider
+    SetupUserModeTrace();
 
     return true;
 }
@@ -479,6 +777,8 @@ void SysTraceStop()
 
     CloseTrace( s_traceHandle2 );
     CloseTrace( s_traceHandle );
+    ControlTrace( 0, KERNEL_LOGGER_NAME, s_prop, EVENT_TRACE_CONTROL_STOP );
+    tracy_free( s_prop );
 }
 
 void SysTraceWorker( void* ptr )
@@ -487,8 +787,8 @@ void SysTraceWorker( void* ptr )
     SetThreadPriority( GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL );
     SetThreadName( "Tracy SysTrace" );
     ProcessTrace( &s_traceHandle2, 1, 0, 0 );
-    ControlTrace( 0, KERNEL_LOGGER_NAME, s_prop, EVENT_TRACE_CONTROL_STOP );
-    tracy_free( s_prop );
+    // NOTE: don't stop the trace here. We may have been kicked out by another profiler/application that
+    // wants to access the kernel logger. Don't pull it away from under them.
 }
 
 void SysTraceGetExternalName( uint64_t thread, const char*& threadName, const char*& name )
@@ -564,10 +864,10 @@ void SysTraceGetExternalName( uint64_t thread, const char*& threadName, const ch
         {
             {
                 uint64_t _pid = pid;
-                TracyLfqPrepare( QueueType::TidToPid );
+                QueueItem *item = Profiler::QueueSys( QueueType::TidToPid );
                 MemWrite( &item->tidToPid.tid, thread );
                 MemWrite( &item->tidToPid.pid, _pid );
-                TracyLfqCommit;
+                Profiler::QueueSysFinish();
             }
             if( pid == 4 )
             {
@@ -1249,11 +1549,11 @@ void SysTraceWorker( void* ptr )
 #endif
                             auto trace = GetCallstackBlock( cnt, ring, offset );
 
-                            TracyLfqPrepare( QueueType::CallstackSample );
+                            QueueItem *item = Profiler::QueueSys( QueueType::CallstackSampleContextSwitch );
                             MemWrite( &item->callstackSampleFat.time, t0 );
                             MemWrite( &item->callstackSampleFat.thread, tid );
                             MemWrite( &item->callstackSampleFat.ptr, (uint64_t)trace );
-                            TracyLfqCommit;
+                            Profiler::QueueSysFinish();
                         }
                     }
                     pos += hdr.size;
@@ -1306,10 +1606,10 @@ void SysTraceWorker( void* ptr )
                             abort();
                         }
 
-                        TracyLfqPrepare( type );
+                        QueueItem *item = Profiler::QueueSys( type );
                         MemWrite( &item->hwSample.ip, ip );
                         MemWrite( &item->hwSample.time, t0 );
-                        TracyLfqCommit;
+                        Profiler::QueueSysFinish();
                     }
                     pos += hdr.size;
                 }
@@ -1456,7 +1756,7 @@ void SysTraceWorker( void* ptr )
                             else if( prev_state & 0x0080 ) oldThreadState = 102;
                             else                           oldThreadState = 103;
 
-                            TracyLfqPrepare( QueueType::ContextSwitch );
+                            QueueItem *item = Profiler::QueueSys( QueueType::ContextSwitch );
                             MemWrite( &item->contextSwitch.time, t0 );
                             MemWrite( &item->contextSwitch.oldThread, prev_pid );
                             MemWrite( &item->contextSwitch.newThread, next_pid );
@@ -1466,17 +1766,17 @@ void SysTraceWorker( void* ptr )
                             MemWrite( &item->contextSwitch.previousCState, uint8_t( 0 ) );
                             MemWrite( &item->contextSwitch.newThreadPriority, int8_t( next_prio ) );
                             MemWrite( &item->contextSwitch.oldThreadPriority, int8_t( prev_prio ) );
-                            TracyLfqCommit;
+                            Profiler::QueueSysFinish();
 
                             if( cnt > 0 && prev_pid != 0 && CurrentProcOwnsThread( prev_pid ) )
                             {
                                 auto trace = GetCallstackBlock( cnt, ring, traceOffset );
 
-                                TracyLfqPrepare( QueueType::CallstackSampleContextSwitch );
+                                QueueItem *item = Profiler::QueueSys( QueueType::CallstackSampleContextSwitch );
                                 MemWrite( &item->callstackSampleFat.time, t0 );
                                 MemWrite( &item->callstackSampleFat.thread, prev_pid );
                                 MemWrite( &item->callstackSampleFat.ptr, (uint64_t)trace );
-                                TracyLfqCommit;
+                                Profiler::QueueSysFinish();
                             }
                         }
                         else if( rid == EventWaking)
@@ -1496,8 +1796,8 @@ void SysTraceWorker( void* ptr )
                             offset += dataOffset + 8 + 16;
                             uint32_t pid;
                             ring.Read( &pid, offset, sizeof( uint32_t ) );
-                            
-                            TracyLfqPrepare( QueueType::ThreadWakeup );
+
+                            QueueItem *item = Profiler::QueueSys( QueueType::ThreadWakeup );
                             MemWrite( &item->threadWakeup.time, t0 );
                             MemWrite( &item->threadWakeup.thread, pid );
                             MemWrite( &item->threadWakeup.cpu, (uint8_t)ring.GetCpu() );
@@ -1506,7 +1806,7 @@ void SysTraceWorker( void* ptr )
                             int8_t adjustIncrement = 0; // Should perhaps store the new prio?
                             MemWrite( &item->threadWakeup.adjustReason, adjustReason );
                             MemWrite( &item->threadWakeup.adjustIncrement, adjustIncrement );
-                            TracyLfqCommit;
+                            Profiler::QueueSysFinish();
                         }
                         else
                         {
@@ -1537,10 +1837,10 @@ void SysTraceWorker( void* ptr )
                             ring.Read( &ktime, offset, sizeof( int64_t ) );
 #endif
 
-                            TracyLfqPrepare( QueueType::FrameVsync );
+                            QueueItem *item = Profiler::QueueSys( QueueType::FrameVsync );
                             MemWrite( &item->frameVsync.id, crtc );
                             MemWrite( &item->frameVsync.time, t0 );
-                            TracyLfqCommit;
+                            Profiler::QueueSysFinish();
                         }
 
                         rbPos += hdr.size;
@@ -1618,10 +1918,10 @@ void SysTraceGetExternalName( uint64_t thread, const char*& threadName, const ch
         {
             {
                 uint64_t _pid = pid;
-                TracyLfqPrepare( QueueType::TidToPid );
+                QueueItem *item = Profiler::QueueSys( QueueType::TidToPid );
                 MemWrite( &item->tidToPid.tid, thread );
                 MemWrite( &item->tidToPid.pid, _pid );
-                TracyLfqCommit;
+                Profiler::QueueSysFinish();
             }
             sprintf( fn, "/proc/%i/comm", pid );
             f = fopen( fn, "rb" );

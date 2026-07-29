@@ -37,9 +37,13 @@ void TimelineItem::Draw( bool firstFrame, const TimelineContext& ctx, int yOffse
         return;
     }
 
+    const auto label = HeaderLabel();
+    ImVec2 labelSize = ImGui::CalcTextSize( label );
+    labelSize.y += ImGui::GetStyle().FramePadding.y * 2.0f;
+
     const auto w = ctx.w;
     const auto ty = ctx.ty;
-    const auto ostep = ty + 1;
+    const auto ostep = labelSize.y + 1;
     const auto& wpos = ctx.wpos;
     const auto yPos = wpos.y + yBegin;
     const auto dpos = wpos + ImVec2( 0.5f, 0.5f );
@@ -65,9 +69,46 @@ void TimelineItem::Draw( bool firstFrame, const TimelineContext& ctx, int yOffse
     DrawOverlay( wpos + ImVec2( 0, yBegin ), wpos + ImVec2( w, yEnd ) );
     ImGui::PopClipRect();
 
-    float labelWidth;
+    float xOffset = 0.0f;
+    const float ItemSpacing = ImGui::GetStyle().ItemSpacing.x;
     const auto hdrOffset = yBegin;
-    const bool drawHeader = yPos + ty >= ctx.yMin && yPos <= ctx.yMax;
+    const bool drawHeader = yPos + labelSize.y >= ctx.yMin && yPos <= ctx.yMax;
+
+    const ViewData& vd = m_view.GetViewData();
+    if ( vd.darkenOutsideExport )
+    {
+        // NOTE: if we have an export range, darken the areas that are outside said range
+        int64_t exportStart = 0;
+        int64_t exportEnd = 0;
+        if ( m_worker.GetExportRange( exportStart, exportEnd ) )
+        {
+            const int64_t beforeStart = std::min( exportStart, vd.zvStart );
+            const int64_t beforeEnd = std::max( exportStart, vd.zvStart );
+
+            const ImVec2 beforeMin( ctx.wpos.x + ( beforeStart - vd.zvStart ) * ctx.pxns, ctx.wpos.y + yBegin );
+            const ImVec2 beforeMax( ctx.wpos.x + ( beforeEnd - vd.zvStart ) * ctx.pxns, ctx.wpos.y + yEnd );
+
+            const int64_t afterStart = std::min( exportEnd, vd.zvEnd );
+            const int64_t afterEnd = std::max( exportEnd, vd.zvEnd );
+
+            const ImVec2 afterMin( ctx.wpos.x + ( afterStart - vd.zvStart ) * ctx.pxns, ctx.wpos.y + yBegin );
+            const ImVec2 afterMax( ctx.wpos.x + ( afterEnd - vd.zvStart ) * ctx.pxns, ctx.wpos.y + yEnd );
+
+            auto draw = ImGui::GetWindowDrawList();
+            draw->AddRectFilled( beforeMin, beforeMax, 0x55000000 );
+            draw->AddRectFilled( afterMin, afterMax, 0x55000000 );
+
+            if ( ImGui::IsMouseHoveringRect( beforeMin, beforeMax ) || ImGui::IsMouseHoveringRect( afterMin, afterMax ) )
+            {
+                if ( ImGui::BeginTooltip() )
+                {
+                    ImGui::Text( "Area ouside the exported range.\nZones may be incomplete!" );
+                    ImGui::EndTooltip();
+                }
+            }
+        }
+    }
+
     if( drawHeader )
     {
         const auto color = HeaderColor();
@@ -81,16 +122,12 @@ void TimelineItem::Draw( bool firstFrame, const TimelineContext& ctx, int yOffse
         {
             DrawTextContrast( draw, wpos + ImVec2( 0, hdrOffset ), colorInactive, ICON_FA_CARET_RIGHT );
         }
-        const auto label = HeaderLabel();
-        labelWidth = ImGui::CalcTextSize( label ).x;
-        DrawTextContrast( draw, wpos + ImVec2( ty, hdrOffset ), m_showFull ? color : colorInactive, label );
-        if( m_showFull )
-        {
-            DrawLine( draw, dpos + ImVec2( 0, hdrOffset + ty - 1 ), dpos + ImVec2( w, hdrOffset + ty - 1 ), HeaderLineColor() );
-            HeaderExtraContents( ctx, hdrOffset, labelWidth );
-        }
+        xOffset = ty;
+        HeaderLabelPrefix( ctx, hdrOffset, xOffset );
+        DrawTextContrast( draw, wpos + ImVec2( xOffset, hdrOffset ), m_showFull ? color : colorInactive, label );
+        xOffset += labelSize.x + ItemSpacing;
 
-        if( ctx.hover && ImGui::IsMouseHoveringRect( wpos + ImVec2( 0, hdrOffset ), wpos + ImVec2( ty + labelWidth, hdrOffset + ty ) ) )
+        if( ctx.hover && ImGui::IsMouseHoveringRect( wpos + ImVec2( 0, hdrOffset ), wpos + ImVec2( xOffset, hdrOffset + labelSize.y ) ) )
         {
             HeaderTooltip( label );
 
@@ -112,6 +149,13 @@ void TimelineItem::Draw( bool firstFrame, const TimelineContext& ctx, int yOffse
                 ImGui::OpenPopup( "menuPopup" );
             }
         }
+
+        if ( m_showFull )
+        {
+            DrawLine( draw, dpos + ImVec2( 0, hdrOffset + labelSize.y - 1 ), dpos + ImVec2( w, hdrOffset + labelSize.y - 1 ), HeaderLineColor() );
+            HeaderExtraContents( ctx, hdrOffset, xOffset );
+        }
+
     }
 
     if( ImGui::BeginPopup( "menuPopup" ) )
@@ -126,6 +170,7 @@ void TimelineItem::Draw( bool firstFrame, const TimelineContext& ctx, int yOffse
     }
 
     yEnd += 0.2f * ostep;
+    DrawUiControls( ctx, yBegin, yEnd, xOffset );
     AdjustThreadHeight( firstFrame, yBegin, yEnd );
     DrawFinished();
 
@@ -134,6 +179,7 @@ void TimelineItem::Draw( bool firstFrame, const TimelineContext& ctx, int yOffse
 
 void TimelineItem::AdjustThreadHeight( bool firstFrame, int yBegin, int yEnd )
 {
+    const bool instant = PreventScrolling();
     const auto speed = 4.0;
     const auto baseMove = 1.0;
 
@@ -145,7 +191,7 @@ void TimelineItem::AdjustThreadHeight( bool firstFrame, int yBegin, int yEnd )
     else if( m_height != newHeight )
     {
         const auto diff = newHeight - m_height;
-        const auto preClampMove = diff * speed * ImGui::GetIO().DeltaTime;
+        const auto preClampMove = diff * ( instant ? 1.0f : speed * ImGui::GetIO().DeltaTime );
         if( diff > 0 )
         {
             const auto move = preClampMove + baseMove;
@@ -160,9 +206,9 @@ void TimelineItem::AdjustThreadHeight( bool firstFrame, int yBegin, int yEnd )
     }
 }
 
-void TimelineItem::VisibilityCheckbox()
+bool TimelineItem::VisibilityCheckbox()
 {
-    SmallCheckbox( HeaderLabel(), &m_visible );
+    return SmallCheckbox( HeaderLabel(), &m_visible );
 }
 
 }

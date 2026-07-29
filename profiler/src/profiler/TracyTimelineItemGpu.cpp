@@ -126,16 +126,17 @@ void TimelineItemGpu::HeaderTooltip( const char* label ) const
     ImGui::EndTooltip();
 }
 
-void TimelineItemGpu::HeaderExtraContents( const TimelineContext& ctx, int offset, float labelWidth )
+void TimelineItemGpu::HeaderExtraContents( const TimelineContext& ctx, int offset, float &xOffset )
 {
     if( m_gpu->name.Active() )
     {
         auto draw = ImGui::GetWindowDrawList();
-        const auto ty = ImGui::GetTextLineHeight();
+        const float ItemSpacing = ImGui::GetStyle().ItemSpacing.x;
 
         char buf[64];
         sprintf( buf, "%s context %i", GpuContextNames[(int)m_gpu->type], m_idx );
-        draw->AddText( ctx.wpos + ImVec2( ty * 1.5f + labelWidth, offset ), HeaderColorInactive(), buf );
+        draw->AddText( ctx.wpos + ImVec2( xOffset, offset ), HeaderColorInactive(), buf );
+        xOffset += ImGui::CalcTextSize( buf ).x + ItemSpacing;
     }
 }
 
@@ -193,6 +194,15 @@ int64_t TimelineItemGpu::RangeEnd() const
 bool TimelineItemGpu::DrawContents( const TimelineContext& ctx, int& offset )
 {
     return m_view.DrawGpu( ctx, *m_gpu, offset );
+}
+
+void TimelineItemGpu::DrawExtraPopupItems()
+{
+    if ( ImGui::MenuItem( ICON_FA_MICROCHIP " Generate CPU zones" ) )
+    {
+        m_worker.CreateZonesFromGpuData();
+        ImGui::CloseCurrentPopup();
+    }
 }
 
 }

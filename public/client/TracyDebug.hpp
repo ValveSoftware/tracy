@@ -1,5 +1,5 @@
-#ifndef __TRACYPRINT_HPP__
-#define __TRACYPRINT_HPP__
+#ifndef __TRACYDEBUG_HPP__
+#define __TRACYDEBUG_HPP__
 
 #ifdef TRACY_VERBOSE
 #  include <stdio.h>

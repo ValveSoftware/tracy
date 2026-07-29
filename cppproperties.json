@@ -1,0 +1,29 @@
+{
+  "configurations":
+  [
+    {
+      "inheritEnvironments":
+      [
+        "msvc_x64"
+      ],
+      "name": "x64-Debug",
+      "includePath":
+      [
+        "${env.INCLUDE}",
+        "${workspaceRoot}\\**"
+      ],
+      "defines":
+      [
+        "WIN32",
+        "_DEBUG",
+        "UNICODE",
+        "_UNICODE",
+        "TRACY_ENABLE=1",
+        "TRACY_ON_DEMAND=1",
+        "TRACY_ONLY_LOCALHOST=1",
+        "TRACY_NO_CALLSTACK=1"
+      ],
+      "intelliSenseMode": "windows-msvc-x64"
+    }
+  ]
+}

@@ -26,7 +26,7 @@ public:
     bool WantPreprocess() const { return m_wantPreprocess; }
     virtual void Preprocess( const TimelineContext& ctx, TaskDispatch& td, bool visible, int yPos ) { assert( false ); }
 
-    void VisibilityCheckbox();
+    bool VisibilityCheckbox();
     virtual void SetVisible( bool visible ) { m_visible = visible; }
     virtual bool IsVisible() const { return m_visible; }
 
@@ -34,6 +34,7 @@ public:
 
     // returns 0 instead of the correct value for the first frame
     int GetHeight() const { return m_height; }
+    virtual bool PreventScrolling() const { return false; };
 
     const void* GetKey() const { return m_key; }
 
@@ -44,11 +45,14 @@ protected:
     virtual const char* HeaderLabel() const = 0;
 
     virtual void HeaderTooltip( const char* label ) const {};
-    virtual void HeaderExtraContents( const TimelineContext& ctx, int offset, float labelWidth ) {};
+
+    virtual void HeaderLabelPrefix( const TimelineContext &ctx, int yOffset, float &xOffset ) {};
+    virtual void HeaderExtraContents( const TimelineContext &ctx, int offset, float &xOffset ) {};
 
     virtual int64_t RangeBegin() const = 0;
     virtual int64_t RangeEnd() const = 0;
 
+    virtual void DrawUiControls( const TimelineContext &ctx, int start, int &offset, float xOffset ) {};
     virtual bool DrawContents( const TimelineContext& ctx, int& offset ) = 0;
     virtual void DrawOverlay( const ImVec2& ul, const ImVec2& dr ) {}
     virtual void DrawExtraPopupItems() {}

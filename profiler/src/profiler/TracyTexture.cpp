@@ -180,7 +180,7 @@ void UpdateTextureRGBAMips( ImTextureID _tex, void** data, int* w, int* h, size_
     glBindTexture( GL_TEXTURE_2D, tex );
     for( size_t i=0; i<mips; i++ )
     {
-        glTexImage2D( GL_TEXTURE_2D, i, GL_RGBA, w[i], h[i], 0, GL_RGBA, GL_UNSIGNED_BYTE, data[i] );
+        glTexImage2D( GL_TEXTURE_2D, (GLint)i, GL_RGBA, w[i], h[i], 0, GL_RGBA, GL_UNSIGNED_BYTE, data[i] );
     }
 }
 

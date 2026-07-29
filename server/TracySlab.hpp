@@ -44,7 +44,7 @@ public:
         else
         {
             void* ret = m_ptr + offset;
-            m_offset += size;
+            m_offset += (uint32_t)size;
             return ret;
         }
     }
@@ -87,7 +87,7 @@ public:
     tracy_force_inline void Unalloc( size_t size )
     {
         assert( size <= m_offset );
-        m_offset -= size;
+        m_offset -= (uint32_t)size;
     }
 
     tracy_force_inline void* AllocBig( size_t size )
@@ -96,12 +96,12 @@ public:
         if( offset + size <= BlockSize )
         {
             void* ret = m_ptr + offset;
-            m_offset += size;
+            m_offset += (uint32_t)size;
             return ret;
         }
         else if( size <= BlockSize && BlockSize - offset <= 1024 )
         {
-            return DoAlloc( size );
+            return DoAlloc( (uint32_t)size );
         }
         else
         {

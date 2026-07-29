@@ -6,11 +6,14 @@ set (ROOT_DIR "${CMAKE_CURRENT_LIST_DIR}/../")
 # Dependencies are taken from the system first and if not found, they are pulled with CPM and built from source
 
 include(FindPkgConfig)
+include(ExternalProject)
 include(${CMAKE_CURRENT_LIST_DIR}/CPM.cmake)
 
 option(DOWNLOAD_CAPSTONE "Force download capstone" ON)
 option(DOWNLOAD_GLFW "Force download glfw" OFF)
 option(DOWNLOAD_FREETYPE "Force download freetype" OFF)
+option(DOWNLOAD_RAPIDJSON "Force download rapidjson" OFF)
+
 
 # capstone
 
@@ -25,6 +28,7 @@ else()
         NAME capstone
         GITHUB_REPOSITORY capstone-engine/capstone
         GIT_TAG 6.0.0-Alpha1
+        GIT_SHALLOW TRUE
         OPTIONS
             "CAPSTONE_X86_ATT_DISABLE ON"
             "CAPSTONE_ALPHA_SUPPORT OFF"
@@ -68,6 +72,7 @@ if(NOT USE_WAYLAND AND NOT EMSCRIPTEN)
             NAME glfw
             GITHUB_REPOSITORY glfw/glfw
             GIT_TAG 3.4
+            GIT_SHALLOW TRUE
             OPTIONS
                 "GLFW_BUILD_EXAMPLES OFF"
                 "GLFW_BUILD_TESTS OFF"
@@ -92,6 +97,7 @@ else()
         NAME freetype
         GITHUB_REPOSITORY freetype/freetype
         GIT_TAG VER-2-13-3
+        GIT_SHALLOW TRUE
         OPTIONS
             "FT_DISABLE_HARFBUZZ ON"
             "FT_WITH_HARFBUZZ OFF"
@@ -101,12 +107,35 @@ else()
     target_link_libraries(TracyFreetype INTERFACE freetype)
 endif()
 
+# rapidjson
+
+pkg_check_modules(RAPIDJSON rapidjson)
+if(RAPIDJSON_FOUND AND NOT DOWNLOAD_RAPIDJSON)
+    message(STATUS "RapidJson found: ${RAPIDJSON}")
+    add_library(TracyRapidJson INTERFACE)
+    include_directories(${rapidjson_SOURCE_DIR}/include)
+else()
+    CPMAddPackage(
+        NAME rapidjson
+        VERSION 1.1.0
+        GITHUB_REPOSITORY jcelerier/rapidjson
+        GIT_TAG v1.2.1
+        GIT_SHALLOW TRUE
+        OPTIONS "RAPIDJSON_BUILD_TESTS OFF"
+                "RAPIDJSON_BUILD_DOC OFF"
+                "RAPIDJSON_BUILD_EXAMPLES OFF"
+    )
+    add_library(TracyRapidJson INTERFACE)
+    include_directories(${rapidjson_SOURCE_DIR}/include)
+endif()
+
 # Zstd
 
 CPMAddPackage(
     NAME zstd
     GITHUB_REPOSITORY facebook/zstd
     GIT_TAG v1.5.7
+    GIT_SHALLOW TRUE
     OPTIONS
         "ZSTD_BUILD_SHARED OFF"
     EXCLUDE_FROM_ALL TRUE
@@ -135,6 +164,7 @@ CPMAddPackage(
     NAME ImGui
     GITHUB_REPOSITORY ocornut/imgui
     GIT_TAG v1.91.9b-docking
+    GIT_SHALLOW TRUE
     DOWNLOAD_ONLY TRUE
     PATCHES
         "${CMAKE_CURRENT_LIST_DIR}/imgui-emscripten.patch"
@@ -164,10 +194,10 @@ endif()
 
 # NFD
 
-if(NOT NO_FILESELECTOR AND NOT EMSCRIPTEN)
-    if(GTK_FILESELECTOR)
+if (NOT NO_FILESELECTOR AND NOT EMSCRIPTEN)
+        if (GTK_FILESELECTOR)
         set(NFD_PORTAL OFF)
-    else()
+        else()
         set(NFD_PORTAL ON)
     endif()
 
@@ -175,6 +205,7 @@ if(NOT NO_FILESELECTOR AND NOT EMSCRIPTEN)
         NAME nfd
         GITHUB_REPOSITORY btzy/nativefiledialog-extended
         GIT_TAG v1.2.1
+        GIT_SHALLOW TRUE
         EXCLUDE_FROM_ALL TRUE
         OPTIONS
             "NFD_PORTAL ${NFD_PORTAL}"
@@ -183,9 +214,10 @@ endif()
 
 # PPQSort
 
-CPMAddPackage(
+            CPMAddPackage(
     NAME PPQSort
     GITHUB_REPOSITORY GabTux/PPQSort
+    GIT_SHALLOW TRUE
     VERSION 1.0.5
     EXCLUDE_FROM_ALL TRUE
-)
+            )

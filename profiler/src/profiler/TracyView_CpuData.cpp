@@ -15,7 +15,116 @@ constexpr float MinVisSize = 3;
 namespace tracy
 {
 
-bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDraw>& cpuDraw, const std::vector<std::vector<CpuCtxDraw>>& ctxDraw, int& offset, bool hasCpuData )
+struct ThreadStackInfo
+{
+    ZoneEvent ev;
+    int64_t count;
+    bool merged;
+};
+
+static void ExtractThreadStack( Worker &worker, int64_t vAt, int64_t vStart, int64_t vEnd, double nsPerPixel, const Vector<short_ptr<ZoneEvent>> &vec, int depth, Vector<ThreadStackInfo> &rStack );
+
+template<typename Adapter, typename V>
+static void ExtractThreadStack( Worker& worker, int64_t vAt, int64_t vStart, int64_t vEnd, double nsPerPixel, const V& vec, int depth, Vector<ThreadStackInfo>& rStack )
+{
+    auto it = std::lower_bound( vec.begin(), vec.end(), vStart, [&worker] ( const auto& l, const auto& r ) { Adapter a; return worker.GetZoneEnd( a(l) ) <= r; } );
+    if ( it == vec.end() )
+    {
+        return;
+    }
+
+    const auto zitend = std::lower_bound( it, vec.end(), vEnd, [] ( const auto& l, const auto& r ) { Adapter a; return a(l).Start() <= r; } );
+    if ( it == zitend )
+    {
+        return;
+    }
+
+    Adapter a;
+    if ( !a( *it ).IsEndValid() && worker.GetZoneEnd( a( *it ) ) < vStart )
+    {
+        return;
+    }
+
+    if ( worker.GetZoneEnd( a( *( zitend - 1 ) ) ) < vStart )
+    {
+        return;
+    }
+
+    const int64_t MinVisNs = int64_t( round( GetScale() * MinVisSize * nsPerPixel ) );
+
+    assert( it != zitend );
+    assert( worker.GetZoneEnd( a( *it ) ) >= vStart );
+    assert( a( *(zitend - 1) ).Start() <= vEnd );
+
+    const bool wasParentMerged = ( !rStack.empty() && ( rStack.back().merged ) );
+    const int64_t totalEventCount = ( zitend - it );
+
+    while( it < zitend )
+    {
+        const ZoneEvent &ev = a( *it );
+        const int64_t start = ev.Start();
+        const int64_t end = worker.GetZoneEnd( ev );
+        const int64_t zsz = end - ev.Start();
+        if ( wasParentMerged || ( ( zsz < MinVisNs ) && (totalEventCount > 1) ) )
+        {
+            const int64_t count = ( zitend - it );
+            if ( rStack.size() <= depth )
+            {
+                rStack.push_back( ThreadStackInfo{ ZoneEvent(), 0, false});
+            }
+            ThreadStackInfo &rInfo = rStack[ depth ];
+
+            rInfo.count += count;
+            rInfo.merged = true;
+
+            while ( it < zitend )
+            {
+                const ZoneEvent &innerev = a( *it );
+                assert( innerev.Start() <= std::min( end + MinVisNs, vEnd ) );
+                if ( innerev.HasChildren() )
+                {
+                    const Vector<short_ptr<ZoneEvent>> &children = worker.GetZoneChildren( innerev.Child() );
+                    ExtractThreadStack( worker, vAt, vStart, vEnd, nsPerPixel, children, depth + 1, rStack );
+                }
+
+                it++;
+            }
+
+            break;
+        }
+        else
+        {
+            if ( vAt >= start && vAt <= end )
+            {
+                rStack.push_back( ThreadStackInfo{ ev, 1, false});
+                if ( ev.HasChildren() )
+                {
+                    const Vector<short_ptr<ZoneEvent>> &children = worker.GetZoneChildren( ev.Child() );
+                    ExtractThreadStack( worker, vAt, vStart, vEnd, nsPerPixel, children, depth + 1, rStack );
+                }
+                break;
+            }
+            ++it;
+        }
+    }
+}
+
+
+static void ExtractThreadStack( Worker &worker, int64_t vAt, int64_t vStart, int64_t vEnd, double nsPerPixel, const Vector<short_ptr<ZoneEvent>> &vec, int depth, Vector<ThreadStackInfo>& rStack )
+{
+    if ( vec.is_magic() )
+    {
+        ExtractThreadStack<VectorAdapterDirect<ZoneEvent>>( worker, vAt, vStart, vEnd, nsPerPixel, *(Vector<ZoneEvent>*)( &vec ), depth, rStack );
+    }
+    else
+    {
+        ExtractThreadStack<VectorAdapterPointer<ZoneEvent>>( worker, vAt, vStart, vEnd, nsPerPixel, vec, depth, rStack );
+    }
+}
+
+
+
+bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDraw>& cpuDraw, const std::vector<std::vector<CpuCtxDraw>>& ctxDraw, int& offset, bool hasCpuData, bool drawThreadInteractions )
 {
     auto cpuData = m_worker.GetCpuData();
     const auto cpuCnt = m_worker.GetCpuDataCpuCount();
@@ -81,7 +190,6 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
                     TextFocused( "Number of cores:", RealToString( cpuCnt ) );
                     if( usage.own + usage.other != 0 )
                     {
-                        auto& topo = m_worker.GetCpuTopology();
                         const auto mt = m_vd.zvStart + ( ImGui::GetIO().MousePos.x - wpos.x ) * nspx;
                         ImGui::Separator();
                         for( int i=0; i<cpuCnt; i++ )
@@ -92,22 +200,8 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
                                 auto it = std::lower_bound( cs.begin(), cs.end(), mt, [] ( const auto& l, const auto& r ) { return (uint64_t)l.End() < (uint64_t)r; } );
                                 if( it != cs.end() && it->Start() <= mt && it->End() >= mt )
                                 {
-                                    auto tt = m_worker.GetThreadTopology( i );
-                                    if( tt )
-                                    {
-                                        if( topo.size() > 1 )
-                                        {
-                                            ImGui::TextDisabled( "[%i:%i:%i] CPU %i:", tt->package, tt->die, tt->core, i );
-                                        }
-                                        else
-                                        {
-                                            ImGui::TextDisabled( "[%i:%i] CPU %i:", tt->die, tt->core, i );
-                                        }
-                                    }
-                                    else
-                                    {
-                                        ImGui::TextDisabled( "CPU %i:", i );
-                                    }
+                                    const std::string cpuName = m_worker.GetFormattedCpuName( i );
+                                    ImGui::TextDisabled( cpuName.c_str() );
                                     ImGui::SameLine();
                                     const auto thread = m_worker.DecompressThreadExternal( it->Thread() );
                                     bool local, untracked;
@@ -156,8 +250,9 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
     for( int i=0; i<cpuCnt; i++ )
     {
         DrawLine( draw, dpos + ImVec2( 0, offset+sty ), dpos + ImVec2( w, offset+sty ), 0x22DD88DD );
-        auto tt = m_worker.GetThreadTopology( i );
-        if( !ctxDraw[i].empty() && wpos.y + offset + sty >= yMin && wpos.y + offset <= yMax )
+        auto tt = m_worker.GetThreadTopology( CpuThreadId{ (uint32_t)i } );
+
+        if( ( i < ctxDraw.size() ) && !ctxDraw[i].empty() && wpos.y + offset + sty >= yMin && wpos.y + offset <= yMax )
         {
             auto& cs = cpuData[i].cs;
             for( auto& v : ctxDraw[i] )
@@ -182,11 +277,11 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
                             ImGui::SameLine();
                             ImGui::Spacing();
                             ImGui::SameLine();
-                            TextFocused( "Package:", RealToString( tt->package ) );
+                            TextFocused( "Package:", RealToString( tt->package.val ) );
                             ImGui::SameLine();
-                            TextFocused( "Die:", RealToString( tt->die ) );
+                            TextFocused( "Group:", RealToString( tt->group.val ) );
                             ImGui::SameLine();
-                            TextFocused( "Core:", RealToString( tt->core ) );
+                            TextFocused( "Core:", RealToString( tt->core.val ) );
                         }
                         TextFocused( "Context switch regions:", RealToString( v.num ) );
                         ImGui::Separator();
@@ -275,11 +370,11 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
                             ImGui::SameLine();
                             ImGui::Spacing();
                             ImGui::SameLine();
-                            TextFocused( "Package:", RealToString( tt->package ) );
+                            TextFocused( "Package:", RealToString( tt->package.val ) );
                             ImGui::SameLine();
-                            TextFocused( "Die:", RealToString( tt->die ) );
+                            TextFocused( "Die:", RealToString( tt->die.val ) );
                             ImGui::SameLine();
-                            TextFocused( "Core:", RealToString( tt->core ) );
+                            TextFocused( "Core:", RealToString( tt->core.val ) );
                         }
                         if( local )
                         {
@@ -291,7 +386,6 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
                             TextFocused( "Thread:", m_worker.GetThreadName( thread ) );
                             ImGui::SameLine();
                             ImGui::TextDisabled( "(%s)", RealToString( thread ) );
-                            
                             m_drawThreadMigrations = thread;
                             m_cpuDataThread = thread;
                         }
@@ -318,70 +412,92 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
                             ImGui::SameLine();
                             ImGui::TextDisabled( "(%s)", RealToString( thread ) );
                         }
+                        if ( ev.WakeupVal() != -1 )
+                        {
+                            uint8_t wakeupCpu = ev.WakeupCpu();
+
+                            TextFocused( "Readying CPU:", RealToString( wakeupCpu ) );
+
+                            const ThreadData *pThreadData = GetThreadDataForCpu( wakeupCpu, ev.WakeupVal() );
+                            if ( pThreadData )
+                            {
+                                TextDisabledUnformatted( "Readying thread:" );
+                                ImGui::SameLine();
+
+                                const auto thread = pThreadData->id;
+                                bool local, untracked;
+                                const char *txt;
+                                auto label = GetThreadContextData( thread, local, untracked, txt );
+                                if ( local || untracked )
+                                {
+                                    uint32_t color;
+                                    if ( m_vd.dynamicColors != 0 )
+                                    {
+                                        color = local ? GetThreadColor( thread, 0 ) : ( untracked ? 0xFF663333 : 0xFF444444 );
+                                    }
+                                    else
+                                    {
+                                        color = local ? 0xFF334488 : ( untracked ? 0xFF663333 : 0xFF444444 );
+                                    }
+                                    TextColoredUnformatted( HighlightColor<75>( color ), label );
+                                    ImGui::SameLine();
+                                    ImGui::TextDisabled( "(%s)", RealToString( thread ) );
+                                }
+                                else
+                                {
+                                    TextDisabledUnformatted( label );
+                                }
+                            }
+                        }
                         ImGui::Separator();
                         TextFocused( "Start time:", TimeToStringExact( ev.Start() ) );
                         TextFocused( "End time:", TimeToStringExact( end ) );
                         TextFocused( "Activity time:", TimeToString( end - ev.Start() ) );
-                        
-                        // Display data about the switch in
-                        auto threadCtxSwitches = m_worker.GetContextSwitchData( thread );
-                        if( threadCtxSwitches )
+
+                        if ( m_vd.viewContextSwitchStack && ( m_timeAtMouse >= 0 ) )
                         {
-                            auto& v = threadCtxSwitches->v;
-                            auto it = std::lower_bound( v.begin(), v.end(), ev.Start(), [](const auto& l, const auto& r) { return l.Start() < r; } );
-                            // We should have the data, or something went wrong.
-                            assert( it != v.end() && it->Start() == ev.Start() );
-
-                            // Do we have information about the previous CSwitch?
-                            if( it != v.begin() )
+                            const ThreadData* threadData = m_worker.GetThreadData( m_cpuDataThread );
+                            if ( threadData != nullptr )
                             {
-                                auto& prev = *( it - 1 );
-                                    
-                                ImGui::Separator();
-
-                                TextFocused( "Wait reason:", DecodeContextSwitchReasonCode( prev.Reason() ) );
-                                ImGui::SameLine();
-                                ImGui::PushFont( m_smallFont );
-                                ImGui::AlignTextToFramePadding();
-                                TextDisabledUnformatted( DecodeContextSwitchReason( prev.Reason() ) );
-                                ImGui::PopFont();
-                                TextFocused( "Wait state:", DecodeContextSwitchStateCode( prev.State() ) );
-                                TextFocused( "Waiting time:", TimeToString( it->WakeupVal() - prev.End() ) );
-                            }
-                            
-                            // Do we have information about the readying thread?
-                            if( it->Start() - it->WakeupVal() )
-                            {
-                                ImGui::Separator();
-                                TextFocused( "WakeUp delay:", TimeToString( it->Start() - it->WakeupVal() ) );
-                                assert( it->WakeupCpu() < cpuCnt );
-                                const auto& wakeUpCpuCSwitches = cpuData[it->WakeupCpu()].cs;
-                                auto wakeupit = std::lower_bound( wakeUpCpuCSwitches.begin(), wakeUpCpuCSwitches.end(), it->WakeupVal(), []( const auto& l, const auto& r ) { return l.End() < r; } );
-                                if( wakeupit != wakeUpCpuCSwitches.end()
-                                    && wakeupit->Start() < it->WakeupVal()
-                                    && it->WakeupVal() < wakeupit->End() )
+                                int64_t vStart = m_timeAtMouse;
+                                int64_t vEnd = vStart;
+                                if ( m_nsPerPixel > 0 )
                                 {
-                                    TextDisabledUnformatted( "Woken up by:" );
-                                    ImGui::SameLine();
-
-                                    const auto wakeupThread = m_worker.DecompressThreadExternal( wakeupit->Thread() );
-                                    bool wakeupThreadLocal, wakeupThreadUntracked;
-                                    const char* wakeUpThreadProgram;
-                                    auto wakeuplabel = GetThreadContextData( wakeupThread, wakeupThreadLocal, wakeupThreadUntracked, wakeUpThreadProgram );
-                                    
-                                    uint32_t wakeupThreadColor = getDisplayThreadColor( wakeupThread, wakeupThreadLocal, wakeupThreadUntracked );
-                                    TextColoredUnformatted( HighlightColor<75>( wakeupThreadColor ), wakeuplabel );
-                                    ImGui::SameLine();
-                                    ImGui::TextDisabled( "(%s)", RealToString( wakeupThread ) );
+                                    vEnd += ( int64_t ) m_nsPerPixel;
                                 }
-                                else
+
+                                Vector<ThreadStackInfo> stack;
+                                ExtractThreadStack(m_worker, m_timeAtMouse, vStart, vEnd, m_nsPerPixel, threadData->timeline, 0, stack);
+                                if ( !stack.empty() )
                                 {
-                                    TextDisabledUnformatted( "Woken up by Kernel" );
+                                    ImGui::Separator();
+                                    TextDisabledUnformatted( "Time: [" );
+                                    ImGui::SameLine();
+                                    ImGui::Text( "%s", TimeToStringExact( vStart ) );
+                                    ImGui::SameLine();
+                                    TextDisabledUnformatted( "," );
+                                    ImGui::SameLine();
+                                    ImGui::Text( "%s", TimeToStringExact( vEnd ) );
+                                    ImGui::SameLine();
+                                    TextDisabledUnformatted( "]" );
+
+                                    TextFocused( "Stack depth:", RealToString( stack.size() ) );
+                                    for ( int index = 0; index < (int)stack.size(); index++ )
+                                    {
+                                        const ThreadStackInfo &info = stack[ index ];
+                                        if ( !info.merged )
+                                        {
+                                            const char* name = m_worker.GetZoneName( info.ev );
+                                            ImGui::Text( "[%d]: %s", index, name );
+                                        }
+                                        else
+                                        {
+                                            ImGui::Text( "[%d]: * multiple zones: %d", index, info.count );
+                                        }
+                                    }
                                 }
                             }
-
                         }
-
 
                         ImGui::EndTooltip();
                         ImGui::PushFont( m_smallFont );
@@ -401,25 +517,9 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
             }
         }
 
-        char buf[64];
-        if( tt )
-        {
-            auto& topo = m_worker.GetCpuTopology();
-            if( topo.size() > 1 )
-            {
-                sprintf( buf, "[%i:%i:%i] CPU %i", tt->package, tt->die, tt->core, i );
-            }
-            else
-            {
-                sprintf( buf, "[%i:%i] CPU %i", tt->die, tt->core, i );
-            }
-        }
-        else
-        {
-            sprintf( buf, "CPU %i", i );
-        }
-        const auto txtx = ImGui::CalcTextSize( buf ).x;
-        DrawTextSuperContrast( draw, wpos + ImVec2( ty, offset-1 ), 0xFFDD88DD, buf );
+        const std::string cpuName = m_worker.GetFormattedCpuName( i );
+        const auto txtx = ImGui::CalcTextSize( cpuName.c_str() ).x;
+        DrawTextSuperContrast( draw, wpos + ImVec2( ty, offset-1 ), 0xFFDD88DD, cpuName.c_str() );
         if( hover && ImGui::IsMouseHoveringRect( wpos + ImVec2( 0, offset-1 ), wpos + ImVec2( sty + txtx, offset + sty ) ) )
         {
             ImGui::PopFont();
@@ -430,11 +530,46 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
                 ImGui::SameLine();
                 ImGui::Spacing();
                 ImGui::SameLine();
-                TextFocused( "Package:", RealToString( tt->package ) );
+                TextFocused( "Package:", RealToString( tt->package.val ) );
                 ImGui::SameLine();
-                TextFocused( "Die:", RealToString( tt->die ) );
+                TextFocused( "Die:", RealToString( tt->die.val ) );
                 ImGui::SameLine();
-                TextFocused( "Core:", RealToString( tt->core ) );
+                TextFocused( "Core:", RealToString( tt->core.val ) );
+
+                std::vector<const Worker::CpuCacheInfo*> caches;
+                m_worker.GetCachesForCore( tt, caches );
+                if ( !caches.empty() )
+                {
+                    static const ImVec4 s_CacheCols[] =
+                    {
+                        (ImVec4)ImColor( 1.0f, 1.0f, 1.0f ),
+                        (ImVec4)ImColor( 0.6f, 1.0f, 0.6f ),
+                        (ImVec4)ImColor( 1.0f, 0.6f, 0.25f ),
+                        (ImVec4)ImColor( 1.0f, 0.34f, 0.34f ),
+                        (ImVec4)ImColor( 1.0f, 0.0f, 0.0f ),
+                    };
+
+                    static const char s_CacheTypePrefix[] =
+                    {
+                        'x',
+                        'U',
+                        'I',
+                        'D',
+                    };
+
+                    TextDisabledUnformatted( "Caches:" );
+                    for ( const Worker::CpuCacheInfo* cache : caches )
+                    {
+                        const int levelIndex = std::min( (int)cache->level, IM_ARRAYSIZE( s_CacheCols ) );
+                        const int typeIndex = std::min( (int)cache->type, IM_ARRAYSIZE( s_CacheTypePrefix ) );
+                        ImGui::TextColored( s_CacheCols[levelIndex]
+                                            , "   L%u %c$ %s"
+                                            , cache->level
+                                            , s_CacheTypePrefix[ typeIndex ]
+                                            , MemSizeToString( cache->size )
+                        );
+                    }
+                }
             }
             TextFocused( "Context switch regions:", RealToString( cpuData[i].cs.size() ) );
             ImGui::EndTooltip();
@@ -442,6 +577,64 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
         }
 
         offset += sstep;
+    }
+
+    // Drawing threads interactions
+    if ( drawThreadInteractions )
+    {
+        offset = origOffset;
+        for ( int i = 0; i < cpuCnt; i++ )
+        {
+            if ( ( i < ctxDraw.size() ) && !ctxDraw[ i ].empty() && wpos.y + offset + sty >= yMin && wpos.y + offset <= yMax )
+            {
+                auto &cs = cpuData[ i ].cs;
+                for ( auto &v : ctxDraw[ i ] )
+                {
+                    const auto &ev = cs[ v.idx ];
+                    if ( ev.WakeupVal() != -1 )
+                    {
+                        const auto readycolor = 0xFF2280A0; // 0xFF0000FF;
+                        const auto bgSize = GetScale() * 4.f;
+                        const auto lnSize = GetScale() * 2.f;
+                        const auto arrowOffset = GetScale() * 5.f;
+
+                        const auto readyt0 = ev.WakeupVal();
+                        const auto readycpu0 = ev.WakeupCpu();
+
+                        const auto readyt1 = ev.Start();
+                        const auto readycpu1 = i;
+
+                        const auto readypx0 = ( readyt0 - m_vd.zvStart ) * pxns;
+                        const auto readypy0 = origOffset + sty * 0.5f + readycpu0 * sstep;
+
+                        const auto readypx1 = ( readyt1 - m_vd.zvStart ) * pxns;
+                        const auto readypy1 = origOffset + sty * 0.5f + readycpu1 * sstep;
+
+                        if ( readypx1 - readypx0 < 2 )
+                        {
+                            if ( readypx1 - readypx0 < 1 )
+                            {
+                                // Too small, don't draw anything
+                            }
+                            else
+                            {
+                                DrawLine( draw, dpos + ImVec2( readypx0, readypy0 ), dpos + ImVec2( readypx0, readypy1 ), dpos + ImVec2( readypx1, readypy1 ), readycolor );
+                            }
+                        }
+                        else
+                        {
+                            DrawLine( draw, dpos + ImVec2( readypx0, readypy0 ), dpos + ImVec2( readypx0, readypy1 ), dpos + ImVec2( readypx1, readypy1 ), 0xFF000000, bgSize );
+                            DrawLine( draw, dpos + ImVec2( readypx1 - arrowOffset, readypy1 - arrowOffset ), dpos + ImVec2( readypx1, readypy1 ), dpos + ImVec2( readypx1 - arrowOffset, readypy1 + arrowOffset ), 0xFF000000, bgSize );
+
+                            DrawLine( draw, dpos + ImVec2( readypx0, readypy0 ), dpos + ImVec2( readypx0, readypy1 ), dpos + ImVec2( readypx1, readypy1 ), readycolor, lnSize );
+                            DrawLine( draw, dpos + ImVec2( readypx1 - arrowOffset, readypy1 - arrowOffset ), dpos + ImVec2( readypx1, readypy1 ), dpos + ImVec2( readypx1 - arrowOffset, readypy1 + arrowOffset ), readycolor, lnSize );
+                        }
+                    }
+                }
+            }
+
+            offset += sstep;
+        }
     }
 
     if( ImGui::IsMouseHoveringRect( wpos, wpos + ImVec2( w, offset ) ) && IsMouseClickReleased( ImGuiMouseButton_Left ) )

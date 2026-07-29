@@ -47,6 +47,11 @@ public:
         return m_threadMap.find( thread ) != m_threadMap.end();
     }
 
+    tracy_force_inline size_t GetCompressedThreadCount() const
+    {
+        return m_threadExpand.size();
+    }
+
 private:
     uint16_t CompressThreadReal( uint64_t thread );
     uint16_t CompressThreadNew( uint64_t thread );

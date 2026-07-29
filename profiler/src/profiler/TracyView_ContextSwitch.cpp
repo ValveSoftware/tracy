@@ -6,6 +6,7 @@
 #include "TracyTimelineContext.hpp"
 #include "TracyTimelineDraw.hpp"
 #include "TracyView.hpp"
+#include "TracyColor.hpp"
 #include "tracy_pdqsort.h"
 
 namespace tracy
@@ -165,6 +166,165 @@ const char* View::DecodeContextSwitchState( uint8_t state )
     }
 }
 
+void View::DrawContextSwitchList( const TimelineContext &ctx, uint64_t coreIndex, const std::vector<ContextSwitchDraw> &drawList, int offset, int endOffset, bool isFiber )
+{
+    constexpr float MinCtxSize = 4;
+
+    const int64_t vStart = ctx.vStart;
+    const ImVec2& wpos = ctx.wpos;
+    const double pxns = ctx.pxns;
+    const bool hover = ctx.hover;
+    const float w = ctx.w;
+    const float ty = round( ctx.ty * 0.75f );
+
+    const float lineSize = 2 * GetScale();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 dpos = wpos + ImVec2( 0.5f, 0.5f );
+    const float ty05 = round( ty * 0.5f );
+
+    double minpx = -10;
+
+    const int coreCount = m_worker.GetCpuDataCpuCount();
+    const CpuData* allCpuData = m_worker.GetCpuData();
+    if ( (coreCount >= 0) && ( coreIndex < coreCount ) )
+    {
+        const Vector<ContextSwitchCpu> &cslist = allCpuData[ coreIndex ].cs;
+        for ( const ContextSwitchDraw &csd : drawList )
+        {
+            const ContextSwitchCpu &cscpu = cslist[ csd.idx ];
+            const int64_t csStart = cscpu.Start();
+            const int64_t csEnd = cscpu.IsEndValid() ? cscpu.End() : csStart;
+            const uint64_t tid = m_worker.DecompressThreadExternal( cscpu.Thread() );
+
+            uint32_t color = 0xffffffff;
+
+            static const uint32_t idleColor = IM_COL32( 140, 140, 140, 255 );
+            static const uint32_t externalColor[] =
+            {
+                IM_COL32( 255, 10, 10, 255 ),
+                IM_COL32( 160, 10, 10, 255 )
+            };
+
+            switch ( csd.type )
+            {
+                case ContextSwitchDrawType::Running:
+                {
+                    const auto px0 = std::max( { std::max( 0ll, ( csStart - vStart ) ) * pxns, -10.0, double( minpx ) } );
+                    const auto px1 = std::min( ( std::max( 0ll, csEnd - vStart ) ) * pxns, w + 10.0 );
+                    if ( m_worker.IsThreadLocal( tid ) )
+                    {
+                        color = GetThreadColor( tid, 0 );
+                    }
+                    else
+                    {
+                        color = externalColor[ csd.idx & 1 ];
+
+                        if( m_vd.darkenContextSwitches )
+                        {
+                            draw->AddRectFilled( dpos + ImVec2( px0, offset + ty05 ), dpos + ImVec2( px1, endOffset ), 0x661C2321 );
+                        }
+                    }
+
+                    DrawLine( draw, dpos + ImVec2( px0, offset + ty05 - 0.5f ), dpos + ImVec2( px1, offset + ty05 - 0.5f ), color, lineSize );
+                    if ( hover && ImGui::IsMouseHoveringRect( wpos + ImVec2( px0, offset ), wpos + ImVec2( px1, offset + ty + 1 ) ) )
+                    {
+                        m_drawThreadHighlight = tid;
+                        CpuZoneRangeTooltip( csStart, csEnd, coreIndex, tid );
+                        if( IsMouseClicked( 2 ) )
+                        {
+                            ZoomToRange( csStart, csEnd );
+                        }
+                    }
+                } break;
+
+                case ContextSwitchDrawType::Folded:
+                {
+                    const uint64_t num = csd.data;
+                    const ContextSwitchCpu &first = cslist[ csd.idx ];
+                    const ContextSwitchCpu &last = cslist[ csd.idx + num - 1 ];
+                    const int64_t start = first.Start();
+                    const int64_t end = last.IsEndValid() ? last.End() : last.Start();
+
+                    const auto px0 = std::max( ( start - vStart ) * pxns, -10.0 );
+                    const auto px1ns = end - vStart;
+                    minpx = std::min( std::max( px1ns * pxns, px0+MinCtxSize ), double( w + 10 ) );
+                    if ( num == 1 )
+                    {
+                        const auto px1 = std::max( { std::max( 0ll, ( end - vStart ) ) * pxns, double( minpx ) } );
+                        if ( m_worker.IsThreadLocal( tid ) )
+                        {
+                            color = GetThreadColor( tid, 0 );
+                        }
+                        else
+                        {
+                            color = externalColor[ csd.idx & 1 ];
+                            if ( m_vd.darkenContextSwitches )
+                            {
+                                draw->AddRectFilled( dpos + ImVec2( px0, offset + ty05 ), dpos + ImVec2( px1, endOffset ), 0x661C2321 );
+                            }
+                        }
+
+                        DrawLine( draw, dpos + ImVec2( px0, offset + ty05 - 0.5f ), dpos + ImVec2( px1, offset + ty05 - 0.5f ), color, lineSize );
+                        if ( hover && ImGui::IsMouseHoveringRect( wpos + ImVec2( px0, offset ), wpos + ImVec2( px1, offset + ty + 1 ) ) )
+                        {
+                            CpuZoneRangeTooltip( start, end, coreIndex, tid );
+                            if ( IsMouseClicked( 2 ) )
+                            {
+                                ZoomToRange( start, end );
+                            }
+                        }
+                    }
+                    else
+                    {
+                        DrawZigZag( draw, wpos + ImVec2( 0, offset + ty05 ), px0, minpx, ty/4, 0xFF888888 );
+                        if( hover && ImGui::IsMouseHoveringRect( wpos + ImVec2( px0, offset ), wpos + ImVec2( minpx, offset + ty + 1 ) ) )
+                        {
+                            ImGui::BeginTooltip();
+                            TextFocused( "Core is", "context switching multiple times" );
+                            TextFocused( "Number of changes:", RealToString( num ) );
+                            TextFocused( "Time:", TimeToString( end - start ) );
+                            ImGui::EndTooltip();
+
+                            if( IsMouseClicked( 2 ) )
+                            {
+                                ZoomToRange( start, end );
+                            }
+                        }
+                    }
+                } break;
+
+                case ContextSwitchDrawType::Waiting:
+                {
+                    assert( csd.idx > 0 );
+                    const ContextSwitchCpu &cscpuprev = cslist[ csd.idx - 1 ];
+                    const int64_t start = cscpuprev.IsEndValid() ? cscpuprev.End() : cscpuprev.Start();
+                    const int64_t end = cscpu.Start();
+
+                    const auto px0 = std::max( { std::max( 0ll, ( start - vStart ) ) * pxns, -10.0, double( minpx ) } );
+                    const auto px1 = std::min( ( std::max( 0ll, end - vStart ) ) * pxns, w + 10.0 );
+                    color = idleColor;
+
+                    if( m_vd.darkenContextSwitches )
+                    {
+                        draw->AddRectFilled( dpos + ImVec2( px0, offset + ty05 ), dpos + ImVec2( px1, endOffset ), 0x661C2321 );
+                    }
+
+                    DrawLine( draw, dpos + ImVec2( px0, offset + ty05 - 0.5f ), dpos + ImVec2( px1, offset + ty05 - 0.5f ), color, lineSize );
+                    if ( hover && ImGui::IsMouseHoveringRect( wpos + ImVec2( px0, offset ), wpos + ImVec2( px1, offset + ty + 1 ) ) )
+                    {
+                        CpuZoneRangeTooltip( start, end, coreIndex, 0 );
+                        if( IsMouseClicked( 2 ) )
+                        {
+                            ZoomToRange( start, end );
+                        }
+                    }
+                } break;
+            }
+
+        }
+    }
+}
+
 void View::DrawContextSwitchList( const TimelineContext& ctx, const std::vector<ContextSwitchDraw>& drawList, const Vector<ContextSwitchData>& ctxSwitch, int offset, int endOffset, bool isFiber )
 {
     constexpr float MinCtxSize = 4;
@@ -271,16 +431,77 @@ void View::DrawContextSwitchList( const TimelineContext& ctx, const std::vector<
                 }
                 if( tooltip )
                 {
+					if ( ev.WakeupVal() != ev.Start() )
+					{
+						uint8_t wakeupCpu = ev.WakeupCpu();
+						TextFocused( "Readying CPU:", RealToString( wakeupCpu ) );
+
+						const ThreadData *pThreadData = GetThreadDataForCpu( wakeupCpu, ev.WakeupVal() );
+						if ( pThreadData )
+						{
+							TextDisabledUnformatted( "Readying thread:" );
+							ImGui::SameLine();
+
+							const auto thread = pThreadData->id;
+							bool local, untracked;
+							const char *txt;
+							auto label = GetThreadContextData( thread, local, untracked, txt );
+							if ( local || untracked )
+							{
+								uint32_t color;
+								if ( m_vd.dynamicColors != 0 )
+								{
+									color = local ? GetThreadColor( thread, 0 ) : ( untracked ? 0xFF663333 : 0xFF444444 );
+								}
+								else
+								{
+									color = local ? 0xFF334488 : ( untracked ? 0xFF663333 : 0xFF444444 );
+								}
+								TextColoredUnformatted( HighlightColor<75>( color ), label );
+								ImGui::SameLine();
+								ImGui::TextDisabled( "(%s)", RealToString( thread ) );
+							}
+							else
+							{
+								TextDisabledUnformatted( label );
+							}
+						}
+					}
+					
                     const auto waitStack = v.data;
+					const auto readyingStack = v.readyingStack;
+					if ( waitStack || readyingStack )
+					{
+						ImGui::Separator();
+					}
+					
                     if( waitStack )
                     {
-                            ImGui::Separator();
-                            TextDisabledUnformatted( ICON_FA_HOURGLASS_HALF " Wait stack:" );
-                            CallstackTooltipContents( waitStack );
-                            if( ImGui::IsMouseClicked( 0 ) )
-                            {
-                                m_callstackInfoWindow = waitStack;
-                            }
+                        ImGui::Separator();
+						ImGui::BeginGroup();
+                        TextDisabledUnformatted( ICON_FA_HOURGLASS_HALF " Wait stack:" );
+                        CallstackTooltipContents( waitStack );
+                        if( ImGui::IsMouseClicked( 0 ) )
+                        {
+                            m_callstackInfoWindow = waitStack;
+                        }
+						ImGui::EndGroup();
+						if ( readyingStack )
+						{
+							ImGui::SameLine();
+						}
+                    }
+
+					if ( readyingStack )
+					{
+						ImGui::BeginGroup();
+						TextDisabledUnformatted( ICON_FA_DIAGRAM_PREDECESSOR " Readying stack:" );
+						CallstackTooltipContents( readyingStack );
+						if ( ImGui::IsMouseClicked( 1 ) )
+						{
+							m_callstackInfoWindow = readyingStack;
+						}
+						ImGui::EndGroup();
                     }
                     ImGui::EndTooltip();
                 }

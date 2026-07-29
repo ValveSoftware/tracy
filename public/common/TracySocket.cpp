@@ -504,6 +504,21 @@ bool ListenSocket::Listen( uint16_t port, int backlog )
     int val = 1;
     setsockopt( m_sock, SOL_SOCKET, SO_REUSEADDR, &val, sizeof( val ) );
 #endif
+
+    // NOTE: set a send timeout. If the server is slow to respond (but the connection is still active)
+    // we really want to break out of the send() call and drop the connection. Otherwise the profiler
+    // will keep accumulating profiling that that can't be sent -> the internal queues will grow unbounded!
+#if defined _WIN32
+    DWORD timeoutSec = 10;
+    DWORD timeoutMs = timeoutSec * 1000;
+    setsockopt(m_sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeoutMs, sizeof( timeoutMs ) );
+#else
+    struct timeval timeout = { 0 };
+    timeout.tv_sec = 10;
+    timeout.tv_usec = 0;
+    setsockopt(m_sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof( timeout ) );
+#endif
+
     if( bind( m_sock, res->ai_addr, res->ai_addrlen ) == -1 ) { freeaddrinfo( res ); Close(); return false; }
     if( listen( m_sock, backlog ) == -1 ) { freeaddrinfo( res ); Close(); return false; }
     freeaddrinfo( res );
