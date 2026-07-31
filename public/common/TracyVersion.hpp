@@ -20,7 +20,7 @@ namespace Version
 {
 enum { Major = 0 };
 enum { Minor = 12 };
-enum { Patch = ForceFileVersionPatchConflict + 1 };
+enum { Patch = ForceFileVersionPatchConflict + 2 };
 }
 }
 

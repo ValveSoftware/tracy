@@ -12,7 +12,7 @@ param(
 
 
 $cmakeProjects = @("ALL_BUILD", "INSTALL", "PACKAGE", "ZERO_CHECK", "CMakePredefinedTargets")
-$externDeps = @( "capstone", "freetype", "glfw", "rapidjson", "nfd", "zstd", "imgui", "ppqsort" )
+$externDeps = @( "capstone", "freetype", "glfw", "rapidjson", "nfd", "zstd", "imgui", "ppqsort", "git-ref" )
 
 
 function Cmake-GenerateProjects
@@ -68,6 +68,20 @@ function Compile-Dependencies
         Push-Location $depsPath
 
         $commonBase = (Get-Item .).FullName
+
+        # git-ref special case...
+        $gitrefPrjFullPath = Join-Path -Path "$srcFullPath" -ChildPath "git-ref.vcxproj"
+        if ( Test-Path -Path $gitrefPrjFullPath -PathType Leaf ) {
+            Write-Host "Building: prj file: 'git-ref.vcxproj'" -ForegroundColor DarkYellow
+
+            $msbuildCmd = 'msbuild /nologo /verbosity:quiet /p:Configuration=__config__ /p:OutDir="__outdir__" /t:Rebuild ' + $gitrefPrjFullPath
+
+            $compRel = $msbuildCmd.Replace( '__config__', 'Release' ).Replace( '__outdir__', $outFullPath + 'Release\\' )
+            Write-Host $compRel -ForegroundColor DarkGreen
+            Invoke-Expression $compRel
+
+            Write-Host ""
+        }
 
         # imgui special case...
         $imguiPrjFullPath = Join-Path -Path "$srcFullPath" -ChildPath "TracyImGui.vcxproj"
@@ -236,6 +250,9 @@ function Copy-Dependencies
         Write-Host "Copy external includes and libs $srcPath -> $dstPath" -ForegroundColor DarkCyan
 
         New-Item -Path "$dstPath" -ItemType Directory -Force | Out-Null
+
+        $srcGitref = Join-Path -Path "$srcPath" -ChildPath "GitRef.hpp"
+        Copy-Item -Path "$srcGitref" -Destination "$dstPath" -Force
 
         Write-Host "Handling external binary deps" -ForegroundColor DarkCyan
         foreach ( $proj in $externDeps ) {
