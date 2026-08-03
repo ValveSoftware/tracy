@@ -5830,9 +5830,6 @@ Profiler::DequeueStatus Profiler::DequeueContextSwitches( tracy::moodycamel::Con
 
 Profiler::DequeueStatus Profiler::DequeueSerial( DequeueStats& rStats )
 {
-    DequeueStatus result = DequeueStatus::QueueEmpty;
-
-
     {
         bool lockHeld = true;
         while( !m_serialLock.try_lock() )
