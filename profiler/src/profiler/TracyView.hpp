@@ -6,6 +6,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <thread>
 #include <vector>
@@ -30,6 +31,10 @@
 #include "../server/tracy_robin_hood.h"
 #include "../server/TracyVector.hpp"
 
+#ifndef __EMSCRIPTEN__
+#  include "TracyLlm.hpp"
+#endif
+
 namespace tracy
 {
 
@@ -43,7 +48,8 @@ constexpr const char* GpuContextNames[] = {
     "GPUS2",
     "Metal",
     "Custom",
-    "CUDA"
+    "CUDA",
+    "Rocprof"
 };
 
 struct MemoryPage;
@@ -155,8 +161,8 @@ public:
     using SetScaleCallback = void(*)( float );
     using AttentionCallback = void(*)();
 
-    View( void(*cbMainThread)(const std::function<void()>&, bool), const char* addr, uint16_t port, ImFont* fixedWidth, ImFont* smallFont, ImFont* bigFont, SetTitleCallback stcb, SetScaleCallback sscb, AttentionCallback acb, const Config& config, AchievementsMgr* amgr );
-    View( void(*cbMainThread)(const std::function<void()>&, bool), FileRead& f, ImFont* fixedWidth, ImFont* smallFont, ImFont* bigFont, SetTitleCallback stcb, SetScaleCallback sscb, AttentionCallback acb, const Config& config, AchievementsMgr* amgr );
+    View( void(*cbMainThread)(const std::function<void()>&, bool), const char* addr, uint16_t port, SetTitleCallback stcb, SetScaleCallback sscb, AttentionCallback acb, AchievementsMgr* amgr );
+    View( void(*cbMainThread)(const std::function<void()>&, bool), FileRead& f, SetTitleCallback stcb, SetScaleCallback sscb, AttentionCallback acb, AchievementsMgr* amgr );
     ~View();
 
     void RequestSaveSettings();
@@ -164,8 +170,6 @@ public:
 
     bool Draw();
     bool WasActive() const;
-
-    void UpdateFont( ImFont* fixed, ImFont* small, ImFont* big ) { m_fixedFont = fixed; m_smallFont = small; m_bigFont = big; }
 
     void NotifyRootWindowSize( float w, float h ) { m_rootWidth = w; m_rootHeight = h; }
     void ViewSource( const char* fileName, int line );
@@ -220,6 +224,8 @@ public:
 
     bool IsBackgroundDone() const { return m_worker.IsBackgroundDone(); }
 
+    void AddLlmAttachment( const nlohmann::json& json );
+    void AddLlmQuery( const char* query );
     void ResetHwCounterMaxValues();
     void UpdateHwCounterMaxValues( uint64_t maxCount, float maxRate );
 
@@ -290,7 +296,7 @@ private:
     };
 
     void InitTextEditor();
-    void SetupConfig( const Config& config );
+    void SetupConfig();
     void Achieve( const char* id );
     void InitResizeBar();
 
@@ -302,7 +308,8 @@ private:
     void DrawTimelineFrames( const FrameData& frames );
     void DrawTimeline();
     void DrawSampleList( const TimelineContext& ctx, const std::vector<SamplesDraw>& drawList, const Vector<SampleData>& vec, int offset );
-    void DrawZoneList( const TimelineContext& ctx, const std::vector<TimelineDraw>& drawList, int offset, uint64_t tidOrCoreIndex );
+    void DrawZoneList( const TimelineContext& ctx, const std::vector<TimelineDraw>& drawList, int offset, uint64_t tidOrCoreIndex, int maxDepth, double margin );
+    void DrawThreadCropper( const int depth, const uint64_t tid, const float xPos, const float yPos, const float ostep, const float cropperWidth, const bool hasCtxSwitches, unordered_flat_map<uint64_t, int> &depthLimitLut );
     void DrawContextSwitchList( const TimelineContext& ctx, const std::vector<ContextSwitchDraw>& drawList, const Vector<ContextSwitchData>& ctxSwitch, int offset, int endOffset, bool isFiber );
     void DrawContextSwitchList( const TimelineContext& ctx, uint64_t coreIndex, const std::vector<ContextSwitchDraw> &drawList, int offset, int endOffset, bool isFiber );
     void DrawHwCounterList( const TimelineContext &ctx, const HwCounterDraw &drawList, int offset, int height, int endZoneOffset );
@@ -461,6 +468,8 @@ private:
 
     TimelineResizeBar m_framesResize;
 
+    unordered_flat_map<uint64_t, int> m_coreDepthLimit;
+    unordered_flat_map<uint64_t, int> m_threadDepthLimit;
     unordered_flat_map<uint64_t, bool> m_visibleMsgThread;
     unordered_flat_map<uint64_t, bool> m_waitStackThread;
     unordered_flat_map<uint64_t, bool> m_flameGraphThread;
@@ -649,10 +658,6 @@ private:
     const char* m_sourceViewFile;
     bool m_uarchSet = false;
 
-    ImFont* m_smallFont;
-    ImFont* m_bigFont;
-    ImFont* m_fixedFont;
-
     float m_rootWidth, m_rootHeight;
     SetTitleCallback m_stcb;
     bool m_titleSet = false;
@@ -755,7 +760,7 @@ private:
         size_t sortedNum = 0, selSortNum, selSortActive;
         float average, selAverage;
         float median, selMedian;
-        float p75, p90;
+        float p75, p90, p99, p99_9;
         int64_t total, selTotal;
         int64_t selTime;
         bool drawAvgMed = true;
@@ -802,6 +807,8 @@ private:
             median = 0;
             p75 = 0;
             p90 = 0;
+            p99 = 0;
+            p99_9 = 0;
             total = 0;
             tmin = std::numeric_limits<int64_t>::max();
             tmax = std::numeric_limits<int64_t>::min();
@@ -1034,6 +1041,10 @@ private:
             lastTime = 0;
         }
     } m_flameGraphInvariant;
+
+#ifndef __EMSCRIPTEN__
+    TracyLlm m_llm;
+#endif
 };
 
 }

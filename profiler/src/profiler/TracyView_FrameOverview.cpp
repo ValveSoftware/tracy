@@ -41,7 +41,6 @@ static int GetFrameGroup( int frameScale )
 
 }
 
-
 template<class T>
 constexpr const T& clamp( const T& v, const T& lo, const T& hi )
 {
@@ -53,7 +52,7 @@ void View::DrawFrames()
     assert( m_worker.GetFrameCount( *m_frames ) != 0 );
 
     const auto scale = GetScale();
-    auto Height = m_vd.flFrameHeight;
+    const auto Height = m_vd.flFrameHeight;
 
     const uint64_t MaxFrameTime = m_vd.frameOverviewMaxTimeMS * 1000 * 1000;  // 50ms
 
@@ -66,7 +65,7 @@ void View::DrawFrames()
 
     const auto wpos = ImGui::GetCursorScreenPos();
     const auto dpos = wpos + ImVec2( 0.5f, 0.5f );
-    const auto wspace = ImGui::GetWindowContentRegionMax() - ImGui::GetWindowContentRegionMin();
+    const auto wspace = ImGui::GetContentRegionAvail() + ImGui::GetCursorScreenPos();
     const auto w = wspace.x;
     auto draw = ImGui::GetWindowDrawList();
 

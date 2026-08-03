@@ -9,6 +9,7 @@
 #include "TracyTimelineContext.hpp"
 #include "TracyView.hpp"
 #include "tracy_pdqsort.h"
+#include "../Fonts.hpp"
 
 constexpr float MinVisSize = 3;
 
@@ -243,7 +244,7 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
         offset += cpuUsageHeight + 3;
     }
 
-    ImGui::PushFont( m_smallFont );
+    ImGui::PushFont( g_fonts.normal, FontSmall );
     const auto sstep = sty + 1;
 
     const auto origOffset = offset;
@@ -289,7 +290,7 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
                         TextFocused( "End time:", TimeToString( t1 ) );
                         TextFocused( "Activity time:", TimeToString( t1 - t0 ) );
                         ImGui::EndTooltip();
-                        ImGui::PushFont( m_smallFont );
+                        ImGui::PushFont( g_fonts.normal, FontSmall );
 
                         if( IsMouseClicked( 2 ) )
                         {
@@ -453,54 +454,69 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
                         TextFocused( "Start time:", TimeToStringExact( ev.Start() ) );
                         TextFocused( "End time:", TimeToStringExact( end ) );
                         TextFocused( "Activity time:", TimeToString( end - ev.Start() ) );
-
-                        if ( m_vd.viewContextSwitchStack && ( m_timeAtMouse >= 0 ) )
+                        
+                        // Display data about the switch in
+                        auto threadCtxSwitches = m_worker.GetContextSwitchData( thread );
+                        if( threadCtxSwitches )
                         {
-                            const ThreadData* threadData = m_worker.GetThreadData( m_cpuDataThread );
-                            if ( threadData != nullptr )
+                            auto& v = threadCtxSwitches->v;
+                            auto it = std::lower_bound( v.begin(), v.end(), ev.Start(), [](const auto& l, const auto& r) { return l.Start() < r; } );
+                            // We should have the data, or something went wrong.
+                            assert( it != v.end() && it->Start() == ev.Start() );
+
+                            // Do we have information about the previous CSwitch?
+                            if( it != v.begin() )
                             {
-                                int64_t vStart = m_timeAtMouse;
-                                int64_t vEnd = vStart;
-                                if ( m_nsPerPixel > 0 )
+                                auto& prev = *( it - 1 );
+                                    
+                                ImGui::Separator();
+
+                                TextFocused( "Wait reason:", DecodeContextSwitchReasonCode( prev.Reason() ) );
+                                ImGui::SameLine();
+                                ImGui::PushFont( g_fonts.normal, FontSmall );
+                                ImGui::AlignTextToFramePadding();
+                                TextDisabledUnformatted( DecodeContextSwitchReason( prev.Reason() ) );
+                                ImGui::PopFont();
+                                TextFocused( "Wait state:", DecodeContextSwitchStateCode( prev.State() ) );
+                                TextFocused( "Waiting time:", TimeToString( it->WakeupVal() - prev.End() ) );
+                            }
+                            
+                            // Do we have information about the readying thread?
+                            if( it->Start() - it->WakeupVal() )
+                            {
+                                ImGui::Separator();
+                                TextFocused( "WakeUp delay:", TimeToString( it->Start() - it->WakeupVal() ) );
+                                assert( it->WakeupCpu() < cpuCnt );
+                                const auto& wakeUpCpuCSwitches = cpuData[it->WakeupCpu()].cs;
+                                auto wakeupit = std::lower_bound( wakeUpCpuCSwitches.begin(), wakeUpCpuCSwitches.end(), it->WakeupVal(), []( const auto& l, const auto& r ) { return l.End() < r; } );
+                                if( wakeupit != wakeUpCpuCSwitches.end()
+                                    && wakeupit->Start() < it->WakeupVal()
+                                    && it->WakeupVal() < wakeupit->End() )
                                 {
-                                    vEnd += ( int64_t ) m_nsPerPixel;
+                                    TextDisabledUnformatted( "Woken up by:" );
+                                    ImGui::SameLine();
+
+                                    const auto wakeupThread = m_worker.DecompressThreadExternal( wakeupit->Thread() );
+                                    bool wakeupThreadLocal, wakeupThreadUntracked;
+                                    const char* wakeUpThreadProgram;
+                                    auto wakeuplabel = GetThreadContextData( wakeupThread, wakeupThreadLocal, wakeupThreadUntracked, wakeUpThreadProgram );
+                                    
+                                    uint32_t wakeupThreadColor = getDisplayThreadColor( wakeupThread, wakeupThreadLocal, wakeupThreadUntracked );
+                                    TextColoredUnformatted( HighlightColor<75>( wakeupThreadColor ), wakeuplabel );
+                                    ImGui::SameLine();
+                                    ImGui::TextDisabled( "(%s)", RealToString( wakeupThread ) );
                                 }
-
-                                Vector<ThreadStackInfo> stack;
-                                ExtractThreadStack(m_worker, m_timeAtMouse, vStart, vEnd, m_nsPerPixel, threadData->timeline, 0, stack);
-                                if ( !stack.empty() )
+                                else
                                 {
-                                    ImGui::Separator();
-                                    TextDisabledUnformatted( "Time: [" );
-                                    ImGui::SameLine();
-                                    ImGui::Text( "%s", TimeToStringExact( vStart ) );
-                                    ImGui::SameLine();
-                                    TextDisabledUnformatted( "," );
-                                    ImGui::SameLine();
-                                    ImGui::Text( "%s", TimeToStringExact( vEnd ) );
-                                    ImGui::SameLine();
-                                    TextDisabledUnformatted( "]" );
-
-                                    TextFocused( "Stack depth:", RealToString( stack.size() ) );
-                                    for ( int index = 0; index < (int)stack.size(); index++ )
-                                    {
-                                        const ThreadStackInfo &info = stack[ index ];
-                                        if ( !info.merged )
-                                        {
-                                            const char* name = m_worker.GetZoneName( info.ev );
-                                            ImGui::Text( "[%d]: %s", index, name );
-                                        }
-                                        else
-                                        {
-                                            ImGui::Text( "[%d]: * multiple zones: %d", index, info.count );
-                                        }
-                                    }
+                                    TextDisabledUnformatted( "Woken up by Kernel" );
                                 }
                             }
+
                         }
 
+
                         ImGui::EndTooltip();
-                        ImGui::PushFont( m_smallFont );
+                        ImGui::PushFont( g_fonts.normal, FontSmall );
 
                         if( local && IsMouseClicked( 0 ) )
                         {
@@ -573,7 +589,7 @@ bool View::DrawCpuData( const TimelineContext& ctx, const std::vector<CpuUsageDr
             }
             TextFocused( "Context switch regions:", RealToString( cpuData[i].cs.size() ) );
             ImGui::EndTooltip();
-            ImGui::PushFont( m_smallFont );
+            ImGui::PushFont( g_fonts.normal, FontSmall );
         }
 
         offset += sstep;

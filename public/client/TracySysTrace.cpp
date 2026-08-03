@@ -2,7 +2,7 @@
 #include "TracyStringHelpers.hpp"
 #include "TracySysTrace.hpp"
 #include "../common/TracySystem.hpp"
-#include "tier0/index_helpers.h"
+//#include "tier0/index_helpers.h"
 
 #ifdef TRACY_HAS_SYSTEM_TRACING
 
@@ -219,7 +219,7 @@ EXTERN_C ULONG WMIAPI TraceQueryInformation ( _In_ TRACEHANDLE SessionHandle, _I
 
 // Mapping from HwCustomCounterId_t to tracy::QueueType
 // Using QueueType::NUM_TYPES is the mapping is not valid
-static const tracy::QueueType s_mappingCounterToQueueType[ IndexHelpers::IndexTypeToRawInteger( HwCustomCounterId_t::VALVE_COUNTER_MAX_COUNT ) ] =
+static const tracy::QueueType s_mappingCounterToQueueType[ std::underlying_type_t<HwCustomCounterId_t>(HwCustomCounterId_t::VALVE_COUNTER_MAX_COUNT) ] =
 {
     QueueType::HwSampleCpuCycle,            // VALVE_COUNTER_CPU_CYCLES,
     QueueType::HwSampleInstructionRetired,  // VALVE_COUNTER_INSTRUCTION,
@@ -354,7 +354,7 @@ void WINAPI EventRecordCallback( PEVENT_RECORD record )
                 HwCustomCounterId_t counterId = pCounterSamplingList[ nCounter ];
                 if ( (pmcEvent->ProfileSource != 0 ) && ( pmcEvent->ProfileSource == SysTraceGetCounterETWProfileSourceId( counterId ) ) )
                 {
-                    QueueType queueType = s_mappingCounterToQueueType[ IndexHelpers::IndexTypeToRawInteger( counterId ) ];
+                    QueueType queueType = s_mappingCounterToQueueType[ std::underlying_type_t<HwCustomCounterId_t>( counterId ) ];
                     if ( queueType != QueueType::NUM_TYPES )
                     {
                         QueueItem *item = Profiler::QueueSys( queueType );
@@ -565,7 +565,7 @@ bool SysTraceStart( int64_t& samplingPeriod )
         if ( options & Profiler::Options_HardwareSampling )
         {
             // Enable sampling on PMC Overflow
-            ULONG sourceInfos[ IndexHelpers::IndexTypeToRawInteger( HwCustomCounterId_t::VALVE_COUNTER_MAX_COUNT ) ];
+            ULONG sourceInfos[ std::underlying_type_t<HwCustomCounterId_t>( HwCustomCounterId_t::VALVE_COUNTER_MAX_COUNT ) ];
             int nSourcesCount = 0;
             
             const HwCustomCounterId_t *pCounterSamplingList = SysTraceGetCounterList_SamplingMode();
@@ -697,7 +697,7 @@ bool SysTraceStart( int64_t& samplingPeriod )
 	{
         // For now only select 'cache miss' counter to be collected on system events
         // We may decide to collect more PMC counters in the future
-        ULONG sourceInfos[ IndexHelpers::IndexTypeToRawInteger( HwCustomCounterId_t::VALVE_COUNTER_MAX_COUNT ) ];
+        ULONG sourceInfos[ std::underlying_type_t<HwCustomCounterId_t>( HwCustomCounterId_t::VALVE_COUNTER_MAX_COUNT ) ];
         int nSourcesCount = 0;
         const HwCustomCounterId_t *pCounterEventsList = SysTraceGetCounterList_EventsMode();
         for ( int nCounter = 0; nCounter < HW_COUNTER_EVENTS_MAX_COUNT; ++nCounter )
@@ -827,25 +827,23 @@ void SysTraceGetExternalName( uint64_t thread, const char*& threadName, const ch
                 const auto phnd = OpenProcess( PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid );
                 if( phnd != INVALID_HANDLE_VALUE )
                 {
-                    HMODULE modules[1024];
-                    DWORD needed;
-                    if( _EnumProcessModules( phnd, modules, 1024 * sizeof( HMODULE ), &needed ) != 0 )
+                    MEMORY_BASIC_INFORMATION vmeminfo;
+                    SIZE_T infosize = VirtualQueryEx( phnd, ptr, &vmeminfo, sizeof( vmeminfo ) );
+                    if( infosize == sizeof( vmeminfo ) )
                     {
-                        const auto sz = std::min( DWORD( needed / sizeof( HMODULE ) ), DWORD( 1024 ) );
-                        for( DWORD i=0; i<sz; i++ )
+                        if (vmeminfo.Type == MEM_IMAGE)
                         {
+                            // for MEM_IMAGE regions, vmeminfo.AllocationBase _is_ the HMODULE
+                            HMODULE mod = (HMODULE)vmeminfo.AllocationBase;
                             MODULEINFO info;
-                            if( _GetModuleInformation( phnd, modules[i], &info, sizeof( info ) ) != 0 )
+                            if( _GetModuleInformation( phnd, mod, &info, sizeof( info ) ) != 0 )
                             {
-                                if( (uint64_t)ptr >= (uint64_t)info.lpBaseOfDll && (uint64_t)ptr <= (uint64_t)info.lpBaseOfDll + (uint64_t)info.SizeOfImage )
+                                char buf2[1024];
+                                const auto modlen = _GetModuleBaseNameA( phnd, mod, buf2, 1024 );
+                                if( modlen != 0 )
                                 {
-                                    char buf2[1024];
-                                    const auto modlen = _GetModuleBaseNameA( phnd, modules[i], buf2, 1024 );
-                                    if( modlen != 0 )
-                                    {
-                                        threadName = CopyString( buf2, modlen );
-                                        threadSent = true;
-                                    }
+                                    threadName = CopyString( buf2, modlen );
+                                    threadSent = true;
                                 }
                             }
                         }
@@ -1059,6 +1057,64 @@ static const char* ReadFile( const char* path )
     return tmp;
 }
 
+static const char* ReadFile( const char* base, const char* path )
+{
+    const auto blen = strlen( base );
+    const auto plen = strlen( path );
+
+    auto tmp = (char*)tracy_malloc( blen + plen + 1 );
+    memcpy( tmp, base, blen );
+    memcpy( tmp + blen, path, plen );
+    tmp[blen+plen] = '\0';
+
+    auto res = ReadFile( tmp );
+    tracy_free( tmp );
+    return res;
+}
+
+static char* GetTraceFsPath()
+{
+    int fd = open( "/proc/mounts", O_RDONLY );
+    if( fd < 0 ) return nullptr;
+
+    constexpr size_t BufSize = 64 * 1024;
+    auto tmp = (char*)tracy_malloc( BufSize );
+    const auto cnt = read( fd, tmp, BufSize-1 );
+    close( fd );
+    if( cnt < 0 )
+    {
+        tracy_free( tmp );
+        return nullptr;
+    }
+    tmp[cnt] = '\0';
+
+    auto ptr = tmp;
+    while( *ptr )
+    {
+        if( strncmp( ptr, "tracefs ", 8 ) == 0 )
+        {
+            ptr += 8;
+            auto end = ptr;
+            while( *end && *end != ' ' ) end++;
+            if( !*end )
+            {
+                tracy_free( tmp );
+                return nullptr;
+            }
+            const auto len = end - ptr;
+            auto ret = (char*)tracy_malloc( len+1 );
+            memcpy( ret, ptr, len );
+            ret[len] = '\0';
+            return ret;
+        }
+        while( *ptr && *ptr != '\n' ) ptr++;
+        if( *ptr ) ptr++;
+    }
+
+    tracy_free( tmp );
+    return nullptr;
+}
+
 bool SysTraceStart( int64_t& samplingPeriod )
 {
 #ifndef CLOCK_MONOTONIC_RAW
@@ -1073,13 +1129,19 @@ bool SysTraceStart( int64_t& samplingPeriod )
     TracyDebug( "perf_event_paranoid: %i\n", paranoidLevel );
 #endif
 
+    auto traceFsPath = GetTraceFsPath();
+    if( !traceFsPath ) return false;
+    TracyDebug( "tracefs path: %s\n", traceFsPath );
+
     int switchId = -1, wakingId = -1, vsyncId = -1;
-    const auto switchIdStr = ReadFile( "/sys/kernel/debug/tracing/events/sched/sched_switch/id" );
+    const auto switchIdStr = ReadFile( traceFsPath, "/events/sched/sched_switch/id" );
     if( switchIdStr ) switchId = atoi( switchIdStr );
-    const auto wakingIdStr = ReadFile( "/sys/kernel/debug/tracing/events/sched/sched_waking/id" );
+    const auto wakingIdStr = ReadFile( traceFsPath, "/events/sched/sched_waking/id" );
     if( wakingIdStr ) wakingId = atoi( wakingIdStr );
-    const auto vsyncIdStr = ReadFile( "/sys/kernel/debug/tracing/events/drm/drm_vblank_event/id" );
+    const auto vsyncIdStr = ReadFile( traceFsPath, "/events/drm/drm_vblank_event/id" );
     if( vsyncIdStr ) vsyncId = atoi( vsyncIdStr );
+
+    tracy_free( traceFsPath );
 
     TracyDebug( "sched_switch id: %i\n", switchId );
     TracyDebug( "sched_waking id: %i\n", wakingId );

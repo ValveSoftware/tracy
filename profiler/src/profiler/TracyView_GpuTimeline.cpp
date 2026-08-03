@@ -4,6 +4,7 @@
 #include "TracyPrint.hpp"
 #include "TracyTimelineContext.hpp"
 #include "TracyView.hpp"
+#include "../Fonts.hpp"
 
 namespace tracy
 {
@@ -25,7 +26,7 @@ bool View::DrawGpu( const TimelineContext& ctx, const GpuCtxData& gpu, int& offs
 
     auto draw = ImGui::GetWindowDrawList();
 
-    ImGui::PushFont( m_smallFont );
+    ImGui::PushFont( g_fonts.normal, FontSmall );
     const auto sty = ImGui::GetTextLineHeight();
     const auto sstep = sty + 1;
     ImGui::PopFont();
@@ -45,13 +46,12 @@ bool View::DrawGpu( const TimelineContext& ctx, const GpuCtxData& gpu, int& offs
                 const auto begin = tlm.front().GpuStart();
                 const auto drift = GpuDrift( &gpu );
                 if( !singleThread ) offset += sstep;
-                auto partDepth = DispatchGpuZoneLevel( tl, hover, pxns, int64_t( nspx ), wpos, offset, 0, gpu.thread, yMin, yMax, begin, drift );
-
+                const auto partDepth = DispatchGpuZoneLevel( tl, hover, pxns, int64_t( nspx ), wpos, offset, 0, gpu.thread, yMin, yMax, begin, drift );
                 if( partDepth != 0 )
                 {
                     if( !singleThread )
                     {
-                        ImGui::PushFont( m_smallFont );
+                        ImGui::PushFont( g_fonts.normal, FontSmall );
                         DrawTextContrast( draw, wpos + ImVec2( ty, offset-1-sstep ), 0xFFFFAAAA, m_worker.GetThreadName( td.first ) );
                         DrawLine( draw, dpos + ImVec2( 0, offset+sty-sstep ), dpos + ImVec2( w, offset+sty-sstep ), 0x22FFAAAA );
                         ImGui::PopFont();
@@ -90,7 +90,7 @@ bool View::DrawGpu( const TimelineContext& ctx, const GpuCtxData& gpu, int& offs
                 {
                     if( !singleThread )
                     {
-                        ImGui::PushFont( m_smallFont );
+                        ImGui::PushFont( g_fonts.normal, FontSmall );
                         DrawTextContrast( draw, wpos + ImVec2( ty, offset-1-sstep ), 0xFFFFAAAA, m_worker.GetThreadName( td.first ) );
                         DrawLine( draw, dpos + ImVec2( 0, offset+sty-sstep ), dpos + ImVec2( w, offset+sty-sstep ), 0x22FFAAAA );
                         ImGui::PopFont();
@@ -172,7 +172,7 @@ int View::DrawGpuZoneLevel( const V& vec, bool hover, double pxns, int64_t nspx,
         end = AdjustGpuTime( end, begin, drift );
         const auto zsz = std::max( ( end - start ) * pxns, pxns * 0.5 );
         if( zsz < MinVisSize )
-        {          
+        {
             const auto color = GetZoneColor( ev );
             const auto MinVisNs = MinVisSize * nspx;
             int num = 0;

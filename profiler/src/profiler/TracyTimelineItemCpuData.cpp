@@ -10,9 +10,9 @@
 namespace tracy
 {
 
-	TimelineItemCpuData::TimelineItemCpuData( View &view, Worker &worker, void *key )
-		: TimelineItem( view, worker, key, true )
-		, m_drawThreadInteractions( false )
+TimelineItemCpuData::TimelineItemCpuData( View& view, Worker& worker, void* key )
+    : TimelineItem( view, worker, key, true )
+    , m_drawThreadInteractions( false )
 {
 }
 

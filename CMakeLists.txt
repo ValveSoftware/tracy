@@ -33,6 +33,7 @@ else()
 endif()
 
 find_package(Threads REQUIRED)
+find_package(rocprofiler-sdk PATHS "/opt/rocm/lib/cmake")
 
 set(TRACY_PUBLIC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/public)
 
@@ -56,6 +57,10 @@ target_link_libraries(
         Threads::Threads
         ${CMAKE_DL_LIBS}
 )
+if(rocprofiler-sdk_FOUND)
+    target_compile_definitions(TracyClient PUBLIC TRACY_ROCPROF)
+    target_link_libraries(TracyClient PUBLIC rocprofiler-sdk::rocprofiler-sdk)
+endif()
 
 if(TRACY_Fortran)
     add_library(TracyClientF90 ${TRACY_VISIBILITY} "${TRACY_PUBLIC_DIR}/TracyClient.F90")
@@ -142,6 +147,10 @@ set_option(TRACY_VERBOSE "[advanced] Verbose output from the profiler" OFF)
 mark_as_advanced(TRACY_VERBOSE)
 set_option(TRACY_DEMANGLE "[advanced] Don't use default demangling function - You'll need to provide your own" OFF)
 mark_as_advanced(TRACY_DEMANGLE)
+if(rocprofiler-sdk_FOUND)
+    set_option(TRACY_ROCPROF_CALIBRATION "[advanced] Use continuous calibration of the Rocprof GPU time." OFF)
+    mark_as_advanced(TRACY_ROCPROF_CALIBRATION)
+endif()
 
 # handle incompatible combinations
 if(TRACY_MANUAL_LIFETIME AND NOT TRACY_DELAYED_INIT)
@@ -209,21 +218,21 @@ set(common_includes
     ${TRACY_PUBLIC_DIR}/common/TracySocket.hpp
     ${TRACY_PUBLIC_DIR}/common/TracyStackFrames.hpp
     ${TRACY_PUBLIC_DIR}/common/TracySystem.hpp
-    ${TRACY_PUBLIC_DIR}/common/TracyUwp.hpp
+    ${TRACY_PUBLIC_DIR}/common/TracyWinFamily.hpp
     ${TRACY_PUBLIC_DIR}/common/TracyYield.hpp)
 
 install(TARGETS TracyClient
         EXPORT TracyConfig
-        RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR}
-        LIBRARY  DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR}/$<IF:$<CONFIG:Release>,,$<CONFIG>>
+        LIBRARY  DESTINATION ${CMAKE_INSTALL_LIBDIR}/$<IF:$<CONFIG:Release>,,$<CONFIG>>
+        ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}/$<IF:$<CONFIG:Release>,,$<CONFIG>>
         COMPONENT lib)
 if(TRACY_Fortran)
     install(TARGETS TracyClientF90
             EXPORT TracyConfig
-            RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR}
-            LIBRARY  DESTINATION ${CMAKE_INSTALL_LIBDIR}
-            ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR}/$<IF:$<CONFIG:Release>,,$<CONFIG>>
+            LIBRARY  DESTINATION ${CMAKE_INSTALL_LIBDIR}/$<IF:$<CONFIG:Release>,,$<CONFIG>>
+            ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}/$<IF:$<CONFIG:Release>,,$<CONFIG>>
             COMPONENT lib)
 endif()
 # Export targets to build tree root

@@ -58,6 +58,8 @@ TRACY_API bool IsProfilerStarted();
 #  define TracyIsStarted true
 #endif
 
+TRACY_API bool BeginSamplingProfiling();
+TRACY_API void EndSamplingProfiling();
 
 #if defined(TRACY_HAS_CALLSTACK) || defined(TRACY_HAS_SYSTEM_TRACING)
 #   define TRACY_NEEDS_SYMBOL_WORKER
@@ -413,6 +415,9 @@ public:
         return 0;  // unreachable branch
 #endif
     }
+
+    bool BeginSamplingProfiling();
+    void EndSamplingProfiling();
 
     tracy_force_inline int64_t TscTime( int64_t tsc ) { return int64_t( ( tsc - m_initTime ) * m_timerMul ); }
 
@@ -896,6 +901,9 @@ public:
 #ifdef TRACY_FIBERS
     static tracy_force_inline void EnterFiber( const char* fiber, int32_t groupHint )
     {
+#ifdef TRACY_ON_DEMAND
+        if( !GetProfiler().IsConnected() ) return;
+#endif
         TracyQueuePrepare( QueueType::FiberEnter );
         MemWrite( &item->fiberEnter.time, GetTime() );
         MemWrite( &item->fiberEnter.fiber, (uint64_t)fiber );
@@ -905,6 +913,9 @@ public:
 
     static tracy_force_inline void LeaveFiber()
     {
+#ifdef TRACY_ON_DEMAND
+        if( !GetProfiler().IsConnected() ) return;
+#endif
         TracyQueuePrepare( QueueType::FiberLeave );
         MemWrite( &item->fiberLeave.time, GetTime() );
         TracyQueueCommit( fiberLeave );
@@ -1220,7 +1231,6 @@ private:
     double m_timerMul;
     int64_t m_initTime;
     uint64_t m_resolution;
-    uint64_t m_delay;
     std::atomic<int64_t> m_timeBegin;
     std::atomic<bool> m_listenAndBroadcastRequested;
     uint32_t m_mainThread;
@@ -1320,6 +1330,8 @@ private:
 
     uint32_t m_listenPort;
 #ifdef TRACY_ON_DEMAND
+    std::atomic<bool> m_symbolsBusy;
+
     TracyMutex m_deferredLock;
     FastVector<QueueItem> m_deferredQueue;
 #endif

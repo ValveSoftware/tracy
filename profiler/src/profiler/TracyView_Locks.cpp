@@ -9,6 +9,7 @@
 #include "TracyTimelineContext.hpp"
 #include "TracyTimelineDraw.hpp"
 #include "TracyView.hpp"
+#include "../Fonts.hpp"
 
 namespace tracy
 {
@@ -21,7 +22,7 @@ void View::DrawLockHeader( uint32_t id, bool merged, const LockMap& lockmap, con
     if ( merged )
     {
         sprintf( buf, "Merged %u locks", lockmap.lockCount );
-        ImGui::PushFont( m_smallFont );
+        ImGui::PushFont( g_fonts.normal, FontSmall );
         ImVec2 labelSize = ImGui::CalcTextSize( buf );
 
         const uint32_t color = IM_COL32( 204, 115, 202, 190 );
@@ -47,7 +48,7 @@ void View::DrawLockHeader( uint32_t id, bool merged, const LockMap& lockmap, con
     {
         const char *name = ( lockmap.customName.Active() ? m_worker.GetString( lockmap.customName ) : m_worker.GetString( srcloc.function ) );
         sprintf( buf, "%" PRIu32 ": %s", id, name );
-        ImGui::PushFont( m_smallFont );
+        ImGui::PushFont( g_fonts.normal, FontSmall );
         ImVec2 labelSize = ImGui::CalcTextSize( buf );
 
         const uint32_t alpha = ( lockmap.isTerminated ? 190 : 255 );
@@ -682,7 +683,7 @@ void View::DrawLockInfoWindow()
             }
         }
 
-        ImGui::PushFont( m_bigFont );
+        ImGui::PushFont( g_fonts.normal, FontBig );
         if( lock.customName.Active() )
         {
             ImGui::Text( "Lock #%" PRIu32 ": %s", m_lockInfoWindow, m_worker.GetString( lock.customName ) );

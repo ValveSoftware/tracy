@@ -10,7 +10,7 @@
 #  include <tlhelp32.h>
 #  include <inttypes.h>
 #  include <intrin.h>
-#  include "../common/TracyUwp.hpp"
+#  include "../common/TracyWinFamily.hpp"
 #  ifndef _MSC_VER
 #    include <excpt.h>
 #  endif
@@ -747,7 +747,13 @@ static inline void CpuId( uint32_t* regs, uint32_t leaf )
 
 static void InitFailure( const char* msg )
 {
-#if defined _WIN32
+#if defined TRACY_GDK
+    const char* format = "Tracy Profiler initialization failure: %s\n";
+    const int length = snprintf( nullptr, 0, format, msg );
+    char* buffer = (char*)alloca( length + 1 );
+    snprintf( buffer, length + 1, format, msg );
+    OutputDebugStringA( buffer );
+#elif defined _WIN32
     bool hasConsole = false;
     bool reopen = false;
     const auto attached = AttachConsole( ATTACH_PARENT_PROCESS );
@@ -942,7 +948,7 @@ static const char* GetHostInfo()
     static char buf[1024];
     auto ptr = buf;
 #if defined _WIN32
-#  ifdef TRACY_UWP
+#  if defined TRACY_WIN32_NO_DESKTOP
     auto GetVersion = &::GetVersionEx;
 #  else
     auto GetVersion = (t_RtlGetVersion)GetProcAddress( GetModuleHandleA( "ntdll.dll" ), "RtlGetVersion" );
@@ -971,7 +977,7 @@ static const char* GetHostInfo()
         }
         else
         {
-        ptr += sprintf( ptr, "OS: Windows %lu.%lu.%lu\n", ver.dwMajorVersion, ver.dwMinorVersion, ver.dwBuildNumber );
+            ptr += sprintf( ptr, "OS: Windows %lu.%lu.%lu\n", ver.dwMajorVersion, ver.dwMinorVersion, ver.dwBuildNumber );
         }
 #  endif
     }
@@ -1025,7 +1031,7 @@ static const char* GetHostInfo()
     char hostname[512];
     gethostname( hostname, 512 );
 
-#  ifdef TRACY_UWP
+#  if defined TRACY_WIN32_NO_DESKTOP
     const char* user = "";
 #  else
     DWORD userSz = UNLEN+1;
@@ -1239,7 +1245,7 @@ static BroadcastMessage& GetBroadcastMessage( const char* procname, size_t pnsz,
     return msg;
 }
 
-#if defined _WIN32 && !defined TRACY_UWP && !defined TRACY_NO_CRASH_HANDLER
+#if defined _WIN32 && !defined TRACY_WIN32_NO_DESKTOP && !defined TRACY_NO_CRASH_HANDLER
 static DWORD s_profilerThreadId = 0;
 static DWORD s_symbolThreadId = 0;
 static char s_crashText[1024];
@@ -1601,6 +1607,54 @@ static void CrashHandler( int signal, siginfo_t* info, void* /*ucontext*/ )
 }
 #endif
 
+#ifdef TRACY_HAS_SYSTEM_TRACING
+static void StartSystemTracing( int64_t& samplingPeriod )
+{
+    assert( s_sysTraceThread == nullptr );
+
+    // use TRACY_NO_SYS_TRACE=1 to force disabling sys tracing (even if available in the underlying system)
+    // as it can have significant impact on the size of the traces
+    const char* noSysTrace = GetEnvVar( "TRACY_NO_SYS_TRACE" );
+    const bool disableSystrace = (noSysTrace && noSysTrace[0] == '1');
+    if( disableSystrace )
+    {
+        TracyDebug("TRACY: Sys Trace was disabled by 'TRACY_NO_SYS_TRACE=1'\n");
+    }
+    else if( SysTraceStart( samplingPeriod ) )
+    {
+        s_sysTraceThread = (Thread*)tracy_malloc( sizeof( Thread ) );
+        new(s_sysTraceThread) Thread( SysTraceWorker, nullptr );
+        std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
+    }
+}
+
+static void StopSystemTracing()
+{
+    if( s_sysTraceThread )
+    {
+        SysTraceStop();
+        s_sysTraceThread->~Thread();
+        tracy_free( s_sysTraceThread );
+        s_sysTraceThread = nullptr;
+    }
+}
+#endif
+
+bool Profiler::BeginSamplingProfiling()
+{
+#if !defined(TRACY_HAS_SYSTEM_TRACING)
+    return false;
+#elif defined(TRACY_SAMPLING_PROFILER_MANUAL_START)
+    StartSystemTracing( m_samplingPeriod );
+#endif
+    return true;
+}
+void Profiler::EndSamplingProfiling()
+{
+#if defined(TRACY_HAS_SYSTEM_TRACING) && defined(TRACY_SAMPLING_PROFILER_MANUAL_START)
+    StopSystemTracing();
+#endif
+}
 
 enum { QueuePrealloc = 256 * 1024 };
 
@@ -1839,6 +1893,9 @@ TRACY_API LuaZoneState& GetLuaZoneState() { return s_luaZoneState; }
 
 TRACY_API bool ProfilerAvailable() { return s_instance != nullptr; }
 TRACY_API bool ProfilerAllocatorAvailable() { return !RpThreadShutdown; }
+
+TRACY_API bool BeginSamplingProfiling() { return GetProfiler().BeginSamplingProfiling(); }
+TRACY_API void EndSamplingProfiling() { return GetProfiler().EndSamplingProfiling(); }
 
 constexpr static size_t SafeSendBufferSize = 65536;
 
@@ -3613,6 +3670,7 @@ Profiler::Profiler()
     , m_nextConnectionId( 1 )
     , m_listenPort( 0 )
 #ifdef TRACY_ON_DEMAND
+    , m_symbolsBusy( false )
     , m_deferredQueue( 64*1024 )
 #endif
     , m_paramCallback( nullptr )
@@ -3810,7 +3868,7 @@ void Profiler::InstallCrashHandler()
     sigaction( SIGABRT, &crashHandler, &m_prevSignal.abrt );
 #endif
 
-#if defined _WIN32 && !defined TRACY_UWP && !defined TRACY_NO_CRASH_HANDLER
+#if defined _WIN32 && !defined TRACY_WIN32_NO_DESKTOP && !defined TRACY_NO_CRASH_HANDLER
     // We cannot use Vectored Exception handling because it catches application-wide frame-based SEH blocks. We only
     // want to catch unhandled exceptions.
     m_prevHandler = reinterpret_cast<void*>( SetUnhandledExceptionFilter( CrashFilter ) );
@@ -3824,7 +3882,7 @@ void Profiler::InstallCrashHandler()
 
 void Profiler::RemoveCrashHandler()
 {
-#if defined _WIN32 && !defined TRACY_UWP && !defined TRACY_NO_CRASH_HANDLER
+#if defined _WIN32 && !defined TRACY_WIN32_NO_DESKTOP && !defined TRACY_NO_CRASH_HANDLER
     if( m_crashHandlerInstalled )
     {
         auto prev = SetUnhandledExceptionFilter( (LPTOP_LEVEL_EXCEPTION_FILTER)m_prevHandler );
@@ -3854,29 +3912,13 @@ void Profiler::RemoveCrashHandler()
 
 void Profiler::SpawnWorkerThreads( IWorker *pExtWorker, DbgHelpLoaderFunc* pDbgHelpLoader )
 {
-#ifdef TRACY_HAS_CALLSTACK
-    InitCallstackCritical();
-#endif
-
     m_pExtWorker = pExtWorker;
     bool needsSymbolWorker = false;
     static_cast<void>(needsSymbolWorker); // potentially unused
 
-#ifdef TRACY_HAS_SYSTEM_TRACING
-    const char* noSysTrace = GetEnvVar( "TRACY_NO_SYS_TRACE" );
-    const bool disableSystrace = (noSysTrace && noSysTrace[0] == '1');
-    if( disableSystrace )
-    {
-        TracyDebug("TRACY: Sys Trace was disabled by 'TRACY_NO_SYS_TRACE=1'\n");
-    }
-    else if( SysTraceStart( m_samplingPeriod ) )
-    {
-        needsSymbolWorker = true;
-        assert( s_sysTraceThread == nullptr );
-        s_sysTraceThread = (Thread*)tracy_malloc( sizeof( Thread ) );
-        new(s_sysTraceThread) Thread( SysTraceWorker, nullptr );
-        std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
-    }
+#if defined(TRACY_HAS_SYSTEM_TRACING) && !defined(TRACY_SAMPLING_PROFILER_MANUAL_START)
+    StartSystemTracing( m_samplingPeriod );
+    needsSymbolWorker = (s_sysTraceThread != nullptr );
 #endif
 
     assert( s_thread == nullptr );
@@ -3900,10 +3942,18 @@ void Profiler::SpawnWorkerThreads( IWorker *pExtWorker, DbgHelpLoaderFunc* pDbgH
         s_symbolThread = (Thread*)tracy_malloc( sizeof( Thread ) );
         new(s_symbolThread) Thread( LaunchSymbolWorker, this );
 
-#       if defined _WIN32 && !defined TRACY_UWP && !defined TRACY_NO_CRASH_HANDLER
-        s_symbolThreadId = GetThreadId( pSymbolThread->Handle() );
-#       endif
+#   if defined _WIN32 && !defined TRACY_WIN32_NO_DESKTOP && !defined TRACY_NO_CRASH_HANDLER
+        s_symbolThreadId = GetThreadId( s_symbolThread->Handle() );
+#   endif
     }
+#endif
+
+#if defined _WIN32 && !defined TRACY_WIN32_NO_DESKTOP && !defined TRACY_NO_CRASH_HANDLER
+    s_profilerThreadId = GetThreadId( s_thread->Handle() );
+#endif
+
+#ifdef TRACY_HAS_CALLSTACK
+    InitCallstackCritical();
 #endif
 
     m_timeBegin.store( GetTime(), std::memory_order_relaxed );
@@ -3912,6 +3962,7 @@ void Profiler::SpawnWorkerThreads( IWorker *pExtWorker, DbgHelpLoaderFunc* pDbgH
 void Profiler::StopWorkerThreads()
 {
     RequestShutdown();
+
     RemoveCrashHandler();
 
     if ( s_thread )
@@ -3922,23 +3973,15 @@ void Profiler::StopWorkerThreads()
     }
 
 #ifdef TRACY_HAS_SYSTEM_TRACING
-    if( s_sysTraceThread )
-    {
-        SysTraceStop();
-        s_sysTraceThread->~Thread();
-        tracy_free( s_sysTraceThread );
-        s_sysTraceThread = nullptr;
-    }
+    StopSystemTracing();
 #endif
 
 #ifdef TRACY_NEEDS_SYMBOL_WORKER
+    if ( s_symbolThread )
     {
-        if ( s_symbolThread )
-        {
-            s_symbolThread->~Thread();
-            tracy_free( s_symbolThread );
-            s_symbolThread = nullptr;
-        }
+        s_symbolThread->~Thread();
+        tracy_free( s_symbolThread );
+        s_symbolThread = nullptr;
     }
 #endif
 
@@ -4415,7 +4458,6 @@ const WelcomeMessage& Profiler::WaitForStartup()
     MemWrite( &m_welcome.timerMul, m_timerMul );
     MemWrite( &m_welcome.initBegin, initTime );
     MemWrite( &m_welcome.initEnd, m_timeBegin.load( std::memory_order_relaxed ) );
-    MemWrite( &m_welcome.delay, m_delay );
     MemWrite( &m_welcome.resolution, m_resolution );
     MemWrite( &m_welcome.epoch, m_epoch );
     MemWrite( &m_welcome.exectime, m_exectime );
@@ -5321,6 +5363,10 @@ static void FreeAssociatedMemory( const QueueItem& item )
         tracy_free( (void*)ptr );
         break;
 #endif
+    case QueueType::GpuAnnotationName:
+        ptr = MemRead<uint64_t>( &item.gpuAnnotationNameFat.ptr );
+        tracy_free( (void*)ptr );
+        break;
 #ifdef TRACY_ON_DEMAND
     case QueueType::MessageAppInfo:
     case QueueType::GpuContextName:
@@ -5613,6 +5659,12 @@ Profiler::DequeueStatus Profiler::Dequeue( moodycamel::ConsumerToken& token, Deq
                         tracy_free_fast( (void*)ptr );
 #endif
                         break;
+                    case QueueType::GpuAnnotationName:
+                        ptr = MemRead<uint64_t>( &item->gpuAnnotationNameFat.ptr );
+                        size = MemRead<uint16_t>( &item->gpuAnnotationNameFat.size );
+                        SendSingleString( (const char*)ptr, size );
+                        tracy_free_fast( (void*)ptr );
+                        break;
                     case QueueType::PlotDataInt:
                     case QueueType::PlotDataFloat:
                     case QueueType::PlotDataDouble:
@@ -5754,19 +5806,20 @@ Profiler::DequeueStatus Profiler::DequeueContextSwitches( tracy::moodycamel::Con
     return ( timeStop == -1 || sz > 0 ) ? DequeueStatus::DataDequeued : DequeueStatus::QueueEmpty;
 }
 
+#define ThreadCtxCheckSerial( _name ) \
+    uint32_t thread = MemRead<uint32_t>( &item->_name.thread ); \
+    switch( ThreadCtxCheck( thread, refTimes ) ) \
+    { \
+    case ThreadCtxStatus::Same: break; \
+    case ThreadCtxStatus::Changed: assert( m_refTimes.m_refTimeThread == 0 ); refThread = 0; break; \
+    case ThreadCtxStatus::ConnectionLost: dequeueStatus = DequeueStatus::ConnectionLost; break; \
+    default: assert( false ); break; \
+    }
+
 Profiler::DequeueStatus Profiler::DequeueSerial( DequeueStats& rStats )
 {
     DequeueStatus result = DequeueStatus::QueueEmpty;
 
-#   define ThreadCtxCheckSerial( _name )                                                                \
-        uint32_t thread = MemRead<uint32_t>( &item->_name.thread );                                     \
-        switch( ThreadCtxCheck( thread, refTimes ) )                                                    \
-        {                                                                                               \
-        case ThreadCtxStatus::Same: break;                                                              \
-        case ThreadCtxStatus::Changed: assert( m_refTimes.m_refTimeThread == 0 ); refThread = 0; break; \
-        case ThreadCtxStatus::ConnectionLost: result = DequeueStatus::ConnectionLost; break;            \
-        default: assert( false ); break;                                                                \
-        }
 
     {
         bool lockHeld = true;
@@ -5786,11 +5839,12 @@ Profiler::DequeueStatus Profiler::DequeueSerial( DequeueStats& rStats )
     }
 
     assert( m_pBufferHandler );
+    DequeueStatus dequeueStatus = DequeueStatus::QueueEmpty;
 
     const auto sz = m_serialDequeue.size();
     if( sz > 0 )
     {
-        result = DequeueStatus::DataDequeued;
+        dequeueStatus = DequeueStatus::DataDequeued;
 
         InitRpmalloc();
 
@@ -5931,6 +5985,14 @@ Profiler::DequeueStatus Profiler::DequeueSerial( DequeueStats& rStats )
 #ifndef TRACY_ON_DEMAND
                     tracy_free_fast( (void*)ptr );
 #endif
+                    break;
+                }
+                case QueueType::GpuAnnotationName:
+                {
+                    ptr = MemRead<uint64_t>( &item->gpuAnnotationNameFat.ptr );
+                    uint16_t size = MemRead<uint16_t>( &item->gpuAnnotationNameFat.size );
+                    SendSingleString( (const char*)ptr, size );
+                    tracy_free_fast( (void*)ptr );
                     break;
                 }
                 case QueueType::HwCounterConfig:
@@ -6123,9 +6185,9 @@ Profiler::DequeueStatus Profiler::DequeueSerial( DequeueStats& rStats )
                     break;
                 }
             }
-            if ( (result == DequeueStatus::ConnectionLost) || !AppendData( item, QueueDataSize[ idx ] ) )
+            if ( (dequeueStatus == DequeueStatus::ConnectionLost) || !AppendData( item, QueueDataSize[ idx ] ) )
             {
-                result = DequeueStatus::ConnectionLost;
+                dequeueStatus = DequeueStatus::ConnectionLost;
                 break;
             }
 
@@ -6167,7 +6229,7 @@ Profiler::DequeueStatus Profiler::DequeueSerial( DequeueStats& rStats )
         m_serialDequeue.clear();
     }
 
-    return result;
+    return dequeueStatus;
 
 #undef refSerial
 #undef refGpu
@@ -6175,9 +6237,8 @@ Profiler::DequeueStatus Profiler::DequeueSerial( DequeueStats& rStats )
 #ifdef TRACY_FIBERS
 #undef refThread
 #endif
-
-#   undef ThreadCtxCheckSerial
 }
+#undef ThreadCtxCheckSerial
 
 
 Profiler::DequeueStatus Profiler::DequeueSys( DequeueStats& rStats )
@@ -6963,6 +7024,7 @@ void Profiler::SymbolWorker()
             m_requestSymbolLock.unlock();
 
             std::this_thread::sleep_for( std::chrono::milliseconds( 20 ) );
+            m_symbolsBusy.store( false, std::memory_order_release );
             continue;
         }
 #endif // ifdef TRACY_ON_DEMAND
@@ -7306,44 +7368,6 @@ void Profiler::CalibrateDelay()
         if( dti > 0 && dti < mindiff ) mindiff = dti;
     }
     m_resolution = mindiff;
-
-#ifdef TRACY_DELAYED_INIT
-    m_delay = m_resolution;
-#else
-    constexpr int MaxEvents = MaxIterations * 2;   // start + end
-    static_assert( MaxEvents < QueuePrealloc, "Delay calibration loop will allocate memory in queue" );
-    int Events = Iterations * 2;
-
-    static const SourceLocationData __tracy_source_location { nullptr, TracyFunction,  TracyFile, (uint32_t)TracyLine, 0 };
-    const auto t0 = GetTime();
-    for( int i=0; i<Iterations; i++ )
-    {
-        {
-            TracyLfqPrepare( QueueType::ZoneBegin );
-            MemWrite( &item->zoneBegin.time, Profiler::GetTime() );
-            MemWrite( &item->zoneBegin.srcloc, (uint64_t)&__tracy_source_location );
-            TracyLfqCommit;
-        }
-        {
-            TracyLfqPrepare( QueueType::ZoneEnd );
-            MemWrite( &item->zoneEnd.time, GetTime() );
-            TracyLfqCommit;
-        }
-    }
-    const auto t1 = GetTime();
-    const auto dt = t1 - t0;
-    m_delay = dt / Events;
-
-    moodycamel::ConsumerToken token( GetQueue() );
-    int left = Events;
-    while( left != 0 )
-    {
-        const auto sz = GetQueue().try_dequeue_bulk_single( token, [](const uint64_t&){}, [](QueueItem* item, size_t sz){} );
-        assert( sz > 0 );
-        left -= (int)sz;
-    }
-    assert( GetQueue().size_approx() == 0 );
-#endif
 }
 
 
@@ -7462,7 +7486,7 @@ void Profiler::ReportTopology()
     uint32_t cacheCount = 0;
 
 #if defined _WIN32
-#  ifdef TRACY_UWP
+#  if defined TRACY_WIN32_NO_DESKTOP
     t_GetLogicalProcessorInformationEx _GetLogicalProcessorInformationEx = &::GetLogicalProcessorInformationEx;
 #  else
     t_GetLogicalProcessorInformationEx _GetLogicalProcessorInformationEx = (t_GetLogicalProcessorInformationEx)GetProcAddress( GetModuleHandleA( "kernel32.dll" ), "GetLogicalProcessorInformationEx" );
@@ -8915,6 +8939,14 @@ TRACY_API int ___tracy_profiler_started( void )
     return tracy::s_isProfilerStarted.load( std::memory_order_seq_cst );
 }
 #  endif
+
+TRACY_API int ___tracy_begin_sampling_profiling( void ) {
+    return tracy::BeginSamplingProfiling() ? 1 : 0;
+}
+
+TRACY_API void ___tracy_end_sampling_profiling( void ) {
+    tracy::EndSamplingProfiling();
+}
 
 TRACY_API void SetupTracyExternalApi( TracyExternalAPI_t *pApi )
 {

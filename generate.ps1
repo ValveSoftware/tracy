@@ -11,9 +11,8 @@ param(
 )
 
 
-$cmakeProjects = @("ALL_BUILD", "INSTALL", "PACKAGE", "ZERO_CHECK", "CMakePredefinedTargets")
-$externDeps = @( "capstone", "freetype", "glfw", "rapidjson", "nfd", "zstd", "imgui", "ppqsort", "git-ref" )
-
+$cmakeProjects = @("ALL_BUILD", "INSTALL", "PACKAGE", "ZERO_CHECK", "CMakePredefinedTargets", "ExternalProjectTargets")
+$externDeps = @( "capstone", "freetype", "glfw", "rapidjson", "nfd", "zstd", "imgui", "ppqsort", "git-ref", "json", "base64", "md4c", "libcurl", "pugixml", "tidy", "embed", "usearch" )
 
 function Cmake-GenerateProjects
 {
@@ -83,6 +82,74 @@ function Compile-Dependencies
             Write-Host ""
         }
 
+        # embed special case...
+        $embedPrjFullPath = Join-Path -Path "$srcFullPath" -ChildPath "embed.vcxproj"
+        if ( Test-Path -Path $embedPrjFullPath -PathType Leaf ) {
+            Write-Host "Building: prj file: 'embed.vcxproj'" -ForegroundColor DarkYellow
+
+            $depsFullPath = Join-Path -Path $srcFullPath -ChildPath "_deps"
+            $outFullPath = Join-Path -Path $depsFullPath -ChildPath "embed-build"
+            New-Item -Path "$outFullPath" -ItemType Directory -Force | Out-Null
+
+            if ( -Not $outFullPath.EndsWith( [System.IO.Path]::DirectorySeparatorChar ) ) {
+                $outFullPath = $outFullPath + [System.IO.Path]::DirectorySeparatorChar
+            }
+
+            Push-Location "$outFullPath"
+
+            $outFullPath = $outFullPath.Replace( "\", "\\" )
+            $msbuildCmd = 'msbuild /nologo /verbosity:quiet /p:Configuration=__config__ /p:OutDir="__outdir__" /t:Rebuild ' + $embedPrjFullPath
+
+            $compRel = $msbuildCmd.Replace( '__config__', 'Release' ).Replace( '__outdir__', $outFullPath + 'Release\\' )
+            Write-Host $compRel -ForegroundColor DarkGreen
+            Invoke-Expression $compRel
+
+            Pop-Location
+
+            $profPrj = Join-Path -Path "$srcFullPath" -ChildPath "tracy-profiler.vcxproj"
+            if ( Test-Path -Path $profPrj -PathType Leaf ) {
+                $content = Get-Content -Path $profPrj
+
+                [XML]$xml = $content
+                $nsUri = "http://schemas.microsoft.com/developer/msbuild/2003"
+
+                $nsManager = New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
+                $nsManager.AddNamespace("ns", $nsUri)
+                $customBuildNodes = Get-MatchingNodes -xml $xml -nsManager $nsManager -xpath "/ns:Project/ns:ItemGroup/ns:CustomBuild" -attr 'Include' -filters @( ".rule" )
+
+                if (@($customBuildNodes).Count -gt 0) {
+                    $embedDataDir = Join-Path -Path "$srcFullPath" -ChildPath "data"
+                    New-Item -ItemType Directory -Force -Path "$embedDataDir" | Out-Null
+
+                    Push-Location "$srcFullPath"
+                    $embed = Join-Path -Path (Get-Location).Path -ChildPath "embed.exe"
+
+                    foreach ( $node in $customBuildNodes ) {
+                        if ( $node -is [System.Xml.XmlNode] ) {
+                            $commandNodes = $node.SelectNodes( "ns:Command", $nsManager )
+
+                            foreach ( $commandNode in $commandNodes ) {
+                                $cond = $commandNode.GetAttribute( "Condition" )
+                                if ( $cond -ne $null -and $cond -like  "*`$(Configuration)*==*Release*") {
+                                    $command = (($commandNode.InnerXml -split "`r?`n") -match "embed" | Out-String).Trim()
+                                    if ( $command -like "*embed*" ) {
+                                        $commandargs = $command.Replace( "embed ", "" ).Trim()
+                                        Start-Process -FilePath $embed -ArgumentList $commandargs -NoNewWindow -Wait | Out-Null
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Pop-Location
+                }
+
+                Remove-MatchingNodes -nodes $customBuildNodes
+            }
+
+            Write-Host ""
+        }
+
         # imgui special case...
         $imguiPrjFullPath = Join-Path -Path "$srcFullPath" -ChildPath "TracyImGui.vcxproj"
         if ( Test-Path -Path $imguiPrjFullPath -PathType Leaf ) {
@@ -124,6 +191,14 @@ function Compile-Dependencies
             $checkDirs = Get-ChildItem -Path $bd -Directory -Recurse
 
             $depProj = $bd.Name.Replace( "-build", "" )
+            if ( $depProj -eq "pugixml" ) {
+                $depProj += "-static"
+            }
+
+            if ( $depProj -eq "libcurl" ) {
+                $depProj = "libcurl_static"
+            }
+
             $prjName = [io.path]::ChangeExtension( $depProj, "vcxproj" )
             $depProjFile = (Get-ChildItem -Path "$bd" -Filter "$prjName" -Recurse -File).FullName
 
@@ -190,6 +265,10 @@ function Prep-Dependency()
         $srcIncPath = Join-Path -Path "$srcPrjPath" -ChildPath "lib"
     } elseif ( $project -eq "nfd" ) {
         $srcIncPath = Join-Path -Path "$srcPrjPath" -ChildPath ( Join-Path -Path "src" -ChildPath "include" )
+    } elseif ( $project -eq "md4c" ) {
+        $srcIncPath = Join-Path -Path "$srcPrjPath" -ChildPath "src"
+    } elseif ( $project -eq "pugixml" ) {
+        $srcIncPath = Join-Path -Path "$srcPrjPath" -ChildPath "src"
     }
 
     if ( Test-Path -Path "$srcIncPath" -PathType Container ) {
@@ -212,9 +291,21 @@ function Prep-Dependency()
             }
         } elseif ( $project -eq "zstd" ) {
             Copy-Item -Path "$srcIncPath\*.h" -Destination "$dstIncPath\" -Force
+        } elseif ( $project -eq "md4c" ) {
+            Copy-Item -Path "$srcIncPath\*.h" -Destination "$dstIncPath\" -Force
+        } elseif ( $project -eq "usearch" ) {
+            Copy-Item -Path "$srcPrjPath\include" -Destination "$dstPrjPath" -Container -Recurse -Force
+            Copy-Item -Path "$srcPrjPath\fp16\include" -Destination "$dstPrjPath\" -Container -Recurse -Force
+        } elseif ( $project -eq "pugixml" ) {
+            Copy-Item -Path "$srcIncPath\*.h" -Destination "$dstIncPath\" -Force
+            Copy-Item -Path "$srcIncPath\*.hpp" -Destination "$dstIncPath\" -Force
         } else {
             Copy-Item -Path "$srcIncPath\*" -Destination "$dstIncPath\" -Recurse -Container -Force
         }
+    }
+
+    if ( $project -eq "json" ) {
+        Copy-Item -Path "$srcPrjPath\nlohmann_json.natvis" -Destination "$dstPrjPath\" -Force
     }
 
     $srcLibPath = Join-Path -Path "$srcPath" -ChildPath ( Join-Path -Path "_deps" -ChildPath "$project-build" )
@@ -250,6 +341,11 @@ function Copy-Dependencies
         Write-Host "Copy external includes and libs $srcPath -> $dstPath" -ForegroundColor DarkCyan
 
         New-Item -Path "$dstPath" -ItemType Directory -Force | Out-Null
+
+        $embedSrcDir = Join-Path -Path "$srcPath" -ChildPath "data"
+        $embedDstDir = Join-Path -Path "$dstPath" -ChildPath "data"
+        Write-Host "Copy generated embedded data from " $embedSrcDir " to " $embedDstDir
+        Copy-Item -Path "$embedSrcDir" -Destination "$embedDstDir" -Force -Recurse
 
         $srcGitref = Join-Path -Path "$srcPath" -ChildPath "GitRef.hpp"
         Copy-Item -Path "$srcGitref" -Destination "$dstPath" -Force
@@ -376,10 +472,17 @@ function Rewrite-Projects
             $content = $content.Replace( 'zstd-src\build\cmake\..\..\lib', 'zstd-src\include' )
             $content = $content.Replace( 'zstd-build\lib', 'zstd-build' )
 
+            $content = $content.Replace( 'md4c-src\src', 'md4c-src\include' )
+            $content = $content.Replace( 'md4c-build\src', 'md4c-build' )
+            $content = $content.Replace( 'pugixml-src\src', 'pugixml-src\include' )
+            $content = $content.Replace( 'pugixml-static', 'pugixml' )
+
             $content = $content.Replace( 'nfd-src\src\include', 'nfd-src\include' )
             $content = $content.Replace( 'nfd-build\src', 'nfd-build' )
 
             $content = $content.Replace( 'glfw-build\src', 'glfw-build' )
+
+            $content = $content.Replace( 'libcurl-build\lib', 'libcurl-build' )
 
             $content = $content.Replace( '_deps\imgui-src', '_deps\imgui-src\include' )
             $content = $content.Replace( 'Debug\TracyImGui.lib', '_deps\imgui-build\Debug\TracyImGui.lib' )
@@ -398,6 +501,9 @@ function Rewrite-Projects
             # Remove cmake references
             $cmakeRefNodes = Get-MatchingNodes -xml $xml -nsManager $nsManager -xpath "/ns:Project/ns:ItemGroup/ns:CustomBuild" -attr 'Include' -filters @( "CMakeLists.txt" )
             Remove-MatchingNodes -nodes $cmakeRefNodes
+
+            $cmakeCustomBuildNodes = Get-MatchingNodes -xml $xml -nsManager $nsManager -xpath "/ns:Project/ns:ItemGroup/ns:CustomBuild" -attr 'Include' -filters @( ".rule" )
+            Remove-MatchingNodes -nodes $cmakeCustomBuildNodes
 
             # Update intermediate directory
             $intNodes = Get-MatchingNodes -xml $xml -nsManager $nsManager -xpath "/ns:Project/ns:PropertyGroup/ns:IntDir"
@@ -508,9 +614,19 @@ function Rewrite-Projects
                                 $xmlPostChild.AppendChild( $xmlCommandChild ) | Out-Null
                                 $itemDefGroup.AppendChild( $xmlPostChild ) | Out-Null
                             }
-
-                            break
+                        } elseif ( $cond -ne $null -and $cond -like  "*`$(Configuration)*==*Debug*") {
+                            if ( $isAppProj -eq $true ) {
+                                $xmlLink = $itemDefGroup.SelectSingleNode( "ns:Link", $nsManager )
+                                if ( $xmlLink -ne $null ) {
+                                    $xmlLinkOpts = $xmlLink.SelectSingleNode( "ns:AdditionalOptions", $nsManager )
+                                    if ( $xmlLinkOpts -ne $null ) {
+                                        $xmlLinkOpts.InnerXml += " /ignore:4099 "
+                                    }
+                                }
+                            }
                         }
+
+                            # break
                     }
                 }
             }
@@ -565,6 +681,11 @@ function Copy-Projects
                         $prjParts = ( $prjLine -split "," )
                         if ( $prjParts.Count -ge 3 ) {
                             $name = (($prjParts[ 0 ] -split "=")[1]).Trim().Trim("`"")
+
+                            if ( $name -eq "pugixml" ) {
+                                $name += "-static"
+                            }
+
                             $guid = $prjParts[ 2 ].Trim().Trim("`"").ToUpper()
                             if ( -not ( $prjGuids -contains $guid ) ) {
                                 $prjGuids += $guid

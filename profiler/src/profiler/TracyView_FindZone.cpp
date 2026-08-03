@@ -10,6 +10,7 @@
 #include "TracySort.hpp"
 #include "TracyView.hpp"
 #include "tracy_pdqsort.h"
+#include "../Fonts.hpp"
 
 namespace tracy
 {
@@ -307,7 +308,7 @@ void View::DrawFindZone()
     if( !m_worker.AreSourceLocationZonesReady() )
     {
         const auto ty = ImGui::GetTextLineHeight();
-        ImGui::PushFont( m_bigFont );
+        ImGui::PushFont( g_fonts.normal, FontBig );
         ImGui::Dummy( ImVec2( 0, ( ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeight() * 2 - ty ) * 0.5f ) );
         TextCentered( ICON_FA_CROW );
         TextCentered( "Please wait, computing data..." );
@@ -318,7 +319,7 @@ void View::DrawFindZone()
     }
     if( m_worker.GetZoneCount() == 0 )
     {
-        ImGui::PushFont( m_bigFont );
+        ImGui::PushFont( g_fonts.normal, FontBig );
         ImGui::Dummy( ImVec2( 0, ( ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeight() * 2 ) * 0.5f ) );
         TextCentered( ICON_FA_CROW );
         TextCentered( "No zones were collected" );
@@ -388,7 +389,7 @@ void View::DrawFindZone()
 
     if( m_findZone.match.empty() )
     {
-        ImGui::PushFont( m_bigFont );
+        ImGui::PushFont( g_fonts.normal, FontBig );
         ImGui::Dummy( ImVec2( 0, ( ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeight() * 2 ) * 0.5f ) );
         TextCentered( ICON_FA_CROW );
         if( m_findZone.hasResults )
@@ -596,6 +597,8 @@ void View::DrawFindZone()
                     m_findZone.median = vec[vsz/2];
                     m_findZone.p75 = vec[3 * (vsz / 4)];
                     m_findZone.p90 = vec[vsz / 10 * 9];
+                    m_findZone.p99 = vec[size_t(float(vsz * 0.99))];
+                    m_findZone.p99_9 = vec[size_t(float(vsz * 0.999))];
                     m_findZone.total = total;
                     m_findZone.sortedNum = i;
                     m_findZone.tmin = tmin;
@@ -1016,14 +1019,6 @@ void View::DrawFindZone()
                         ImGui::SameLine();
                         ImGui::Spacing();
                         ImGui::SameLine();
-                        TextFocused( "P75:", TimeToString( m_findZone.p75 ) );
-                        ImGui::SameLine();
-                        ImGui::Spacing();
-                        ImGui::SameLine();
-                        TextFocused( "P90:", TimeToString( m_findZone.p90 ) );
-                        ImGui::SameLine();
-                        ImGui::Spacing();
-                        ImGui::SameLine();
                         {
                             int64_t t0, t1;
                             if( m_findZone.logTime )
@@ -1053,6 +1048,19 @@ void View::DrawFindZone()
                             TextFocused( "\xcf\x83:", TimeToString( sd ) );
                             TooltipIfHovered( "Standard deviation" );
                         }
+                        TextFocused( "P75:", TimeToString( m_findZone.p75 ) );
+                        ImGui::SameLine();
+                        ImGui::Spacing();
+                        ImGui::SameLine();
+                        TextFocused( "P90:", TimeToString( m_findZone.p90 ) );
+                        ImGui::SameLine();
+                        ImGui::Spacing();
+                        ImGui::SameLine();
+                        TextFocused( "P99:", TimeToString( m_findZone.p99 ) );
+                        ImGui::SameLine();
+                        ImGui::Spacing();
+                        ImGui::SameLine();
+                        TextFocused( "P99.9:", TimeToString( m_findZone.p99_9 ) );
 
                         TextDisabledUnformatted( "Selection range:" );
                         ImGui::SameLine();
@@ -2065,7 +2073,7 @@ void View::DrawFindZone()
                     assert( false );
                     break;
                 }
-         
+
                 if( m_findZone.groupBy == FindZone::GroupBy::ZoneName )
                 {
                     if( !strstr_nocase( hdrString, m_findZone.pattern ) )

@@ -19,8 +19,8 @@ enum : uint32_t { ForceFileVersionPatchConflict = 0 };
 namespace Version
 {
 enum { Major = 0 };
-enum { Minor = 12 };
-enum { Patch = ForceFileVersionPatchConflict + 2 };
+enum { Minor = 13 };
+enum { Patch = ForceFileVersionPatchConflict + 0 };
 }
 }
 

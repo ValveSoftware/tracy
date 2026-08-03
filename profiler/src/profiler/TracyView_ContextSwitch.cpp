@@ -8,6 +8,7 @@
 #include "TracyView.hpp"
 #include "TracyColor.hpp"
 #include "tracy_pdqsort.h"
+#include "../Fonts.hpp"
 
 namespace tracy
 {
@@ -396,14 +397,14 @@ void View::DrawContextSwitchList( const TimelineContext& ctx, const std::vector<
                         {
                             TextFocused( "Wait reason:", DecodeContextSwitchReasonCode( prev.Reason() ) );
                             ImGui::SameLine();
-                            ImGui::PushFont( m_smallFont );
+                            ImGui::PushFont( g_fonts.normal, FontSmall );
                             ImGui::AlignTextToFramePadding();
                             TextDisabledUnformatted( DecodeContextSwitchReason( prev.Reason() ) );
                             ImGui::PopFont();
                         }
                         TextFocused( "Wait state:", DecodeContextSwitchStateCode( prev.State() ) );
                         ImGui::SameLine();
-                        ImGui::PushFont( m_smallFont );
+                        ImGui::PushFont( g_fonts.normal, FontSmall );
                         ImGui::AlignTextToFramePadding();
                         TextDisabledUnformatted( DecodeContextSwitchState( prev.State() ) );
                         ImGui::PopFont();
@@ -760,7 +761,7 @@ void View::DrawWaitStacks()
     ImGui::BeginChild( "##waitstacks" );
     if( stacks.empty() )
     {
-        ImGui::PushFont( m_bigFont );
+        ImGui::PushFont( g_fonts.normal, FontBig );
         ImGui::Dummy( ImVec2( 0, ( ImGui::GetContentRegionAvail().y - ImGui::GetTextLineHeight() * 2 ) * 0.5f ) );
         TextCentered( ICON_FA_KIWI_BIRD );
         TextCentered( "No wait stacks to display" );

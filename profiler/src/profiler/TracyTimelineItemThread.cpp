@@ -333,7 +333,7 @@ bool TimelineItemThread::DrawContents( const TimelineContext& ctx, int& offset )
 
     m_view.DrawThread( ctx, *m_thread, m_draw, m_ctxDraw, m_samplesDraw, m_lockDraw, m_hwCounterDraw, offset, depth, m_hasCtxSwitch, m_hasSamples, m_hasHwCounter );
 
-    if( (depth == 0) && !hasMessageCheck && !hasLocksCheck )
+    if( (depth == 0) && !hasMessageCheck && !hasLocksCheck && ( !m_view.GetViewData().drawSamples || !m_hasSamples ) )
     {
         auto& crash = m_worker.GetCrashEvent();
         return crash.thread == m_thread->id;
