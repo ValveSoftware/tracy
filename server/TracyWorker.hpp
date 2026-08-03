@@ -782,11 +782,11 @@ public:
     tracy_force_inline const ZoneExtra& GetZoneExtra( const ZoneEvent& ev ) const { return m_data.zoneExtra[ev.extra]; }
 
     std::vector<int16_t> GetMatchingSourceLocation( const char* query, bool ignoreCase ) const;
-    std::vector<int16_t> GetMatchingZonePattern( const char* query, bool ignoreCase ) const;
 
     const unordered_flat_map<uint64_t, SymbolData>& GetSymbolMap() const { return m_data.symbolMap; }
 
 #ifndef TRACY_NO_STATISTICS
+    std::vector<int16_t> GetMatchingZonePattern( const char* query, bool ignoreCase ) const;
     const char *PlotHelper_GetStringForFilterType( PlotFilterType filterType ) const;
     const char *PlotHelper_GetStringForFilterId( int16_t srcloc, PlotFilterType filterType, uint64_t filterId ) const;
     PlotData *CreatePlotForSourceLocation( int16_t srcloc, PlotFilterType filterType, uint64_t filterId, bool bAggregatePerFrame, PlotDrawType drawType, PlotData *pAddToExistingPlot );

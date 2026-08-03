@@ -199,6 +199,10 @@ function Compile-Dependencies
                 $depProj = "libcurl_static"
             }
 
+            if ( $depProj -eq "capstone" ) {
+                $depProj = "capstone_static"
+            }
+
             $prjName = [io.path]::ChangeExtension( $depProj, "vcxproj" )
             $depProjFile = (Get-ChildItem -Path "$bd" -Filter "$prjName" -Recurse -File).FullName
 

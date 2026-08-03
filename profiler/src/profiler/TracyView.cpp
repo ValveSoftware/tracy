@@ -18,6 +18,7 @@
 #include "TracyFileselector.hpp"
 #include "TracyFilesystem.hpp"
 #include "TracyImGui.hpp"
+#include "TracyManualData.hpp"
 #include "TracyPrint.hpp"
 #include "TracySourceView.hpp"
 #include "TracyTexture.hpp"
@@ -63,11 +64,12 @@ View::View( void(*cbMainThread)(const std::function<void()>&, bool), const char*
     , m_achievements( s_config.achievements )
     , m_horizontalScrollMultiplier( s_config.horizontalScrollMultiplier )
     , m_verticalScrollMultiplier( s_config.verticalScrollMultiplier )
+    , m_manualData( std::make_shared<TracyManualData>() )
 #ifdef __EMSCRIPTEN__
     , m_td( 2, "ViewMt" )
 #else
     , m_td( std::thread::hardware_concurrency(), "ViewMt" )
-    , m_llm( m_worker )
+    , m_llm( m_worker, *m_manualData )
 #endif
 {
     InitTextEditor();
@@ -97,11 +99,12 @@ View::View( void(*cbMainThread)(const std::function<void()>&, bool), FileRead& f
     , m_achievements( s_config.achievements )
     , m_horizontalScrollMultiplier( s_config.horizontalScrollMultiplier )
     , m_verticalScrollMultiplier( s_config.verticalScrollMultiplier )
+    , m_manualData( std::make_shared<TracyManualData>() )
 #ifdef __EMSCRIPTEN__
     , m_td( 2, "ViewMt" )
 #else
     , m_td( std::thread::hardware_concurrency(), "ViewMt" )
-    , m_llm( m_worker )
+    , m_llm( m_worker, *m_manualData )
 #endif
 {
     m_notificationTime = 4;
@@ -1048,6 +1051,8 @@ bool View::DrawImpl()
         }
         ImGui::EndPopup();
     }
+    ImGui::SameLine();
+    ToggleButton( ICON_FA_BOOK, m_showManual );
     if( m_sscb )
     {
         ImGui::SameLine();
@@ -1271,6 +1276,7 @@ bool View::DrawImpl()
     if( m_sampleParents.symAddr != 0 ) DrawSampleParents();
     if( m_showRanges ) DrawRanges();
     if( m_showWaitStacks ) DrawWaitStacks();
+    if( m_showManual ) DrawManual();
 #ifndef __EMSCRIPTEN__
     if( m_llm.m_show ) m_llm.Draw();
 #endif

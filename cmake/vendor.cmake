@@ -29,11 +29,12 @@ else()
     CPMAddPackage(
         NAME capstone
         GITHUB_REPOSITORY capstone-engine/capstone
-        GIT_TAG 6.0.0-Alpha1
+        GIT_TAG 6.0.0-Alpha5
         GIT_SHALLOW TRUE
         OPTIONS
             "CAPSTONE_X86_ATT_DISABLE ON"
             "CAPSTONE_ALPHA_SUPPORT OFF"
+            "CAPSTONE_ARC_SUPPORT OFF"
             "CAPSTONE_HPPA_SUPPORT OFF"
             "CAPSTONE_LOONGARCH_SUPPORT OFF"
             "CAPSTONE_M680X_SUPPORT OFF"
@@ -58,7 +59,7 @@ else()
     )
     add_library(TracyCapstone INTERFACE)
     target_include_directories(TracyCapstone INTERFACE ${capstone_SOURCE_DIR}/include/capstone)
-    target_link_libraries(TracyCapstone INTERFACE capstone)
+    target_link_libraries(TracyCapstone INTERFACE capstone_static)
 endif()
 
 # GLFW
@@ -98,7 +99,7 @@ else()
     CPMAddPackage(
         NAME freetype
         GITHUB_REPOSITORY freetype/freetype
-        GIT_TAG VER-2-13-3
+        GIT_TAG VER-2-14-1
         GIT_SHALLOW TRUE
         OPTIONS
             "FT_DISABLE_HARFBUZZ ON"
@@ -165,7 +166,7 @@ target_include_directories(TracyGetOpt PUBLIC ${GETOPT_DIR})
 CPMAddPackage(
     NAME ImGui
     GITHUB_REPOSITORY ocornut/imgui
-    GIT_TAG v1.92.1-docking
+    GIT_TAG v1.92.5-docking
     GIT_SHALLOW TRUE
     DOWNLOAD_ONLY TRUE
     PATCHES
@@ -190,6 +191,11 @@ target_include_directories(TracyImGui PUBLIC ${ImGui_SOURCE_DIR})
 target_link_libraries(TracyImGui PUBLIC TracyFreetype)
 target_compile_definitions(TracyImGui PRIVATE "IMGUI_ENABLE_FREETYPE")
 #target_compile_definitions(TracyImGui PUBLIC "IMGUI_DISABLE_OBSOLETE_FUNCTIONS")
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND LEGACY)
+    find_package(X11 REQUIRED)
+    target_link_libraries(TracyImGui PUBLIC ${X11_LIBRARIES})
+endif()
 
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(TracyImGui PRIVATE "IMGUI_DISABLE_DEBUG_TOOLS" "IMGUI_DISABLE_DEMO_WINDOWS")
@@ -220,8 +226,8 @@ endif()
 CPMAddPackage(
     NAME PPQSort
     GITHUB_REPOSITORY GabTux/PPQSort
+    VERSION 1.0.6
     GIT_SHALLOW TRUE
-    VERSION 1.0.5
     PATCHES
         "${CMAKE_CURRENT_LIST_DIR}/ppqsort-nodebug.patch"
     EXCLUDE_FROM_ALL TRUE
@@ -278,7 +284,7 @@ if(NOT EMSCRIPTEN)
     CPMAddPackage(
         NAME usearch
         GITHUB_REPOSITORY unum-cloud/usearch
-        GIT_TAG v2.19.1
+        GIT_TAG v2.21.3
         EXCLUDE_FROM_ALL TRUE
     )
 
@@ -302,7 +308,7 @@ if(NOT EMSCRIPTEN)
 
     # libcurl
 
-    pkg_check_modules(LIBCURL libcurl)
+    pkg_check_modules(LIBCURL libcurl>=7.87.0)
     if (LIBCURL_FOUND AND NOT DOWNLOAD_LIBCURL)
         add_library(TracyLibcurl INTERFACE)
         target_include_directories(TracyLibcurl INTERFACE ${LIBCURL_INCLUDE_DIRS})
@@ -311,7 +317,7 @@ if(NOT EMSCRIPTEN)
         CPMAddPackage(
             NAME libcurl
             GITHUB_REPOSITORY curl/curl
-            GIT_TAG curl-8_14_1
+            GIT_TAG curl-8_17_0
             OPTIONS
                 "BUILD_STATIC_LIBS ON"
                 "BUILD_SHARED_LIBS OFF"

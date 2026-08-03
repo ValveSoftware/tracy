@@ -3198,6 +3198,7 @@ std::vector<int16_t> Worker::GetMatchingSourceLocation( const char* query, bool 
     return match;
 }
 
+#ifndef TRACY_NO_STATISTICS
 std::vector<int16_t> Worker::GetMatchingZonePattern( const char* query, bool ignoreCase ) const
 {
     std::vector<int16_t> match;
@@ -3259,7 +3260,6 @@ std::vector<int16_t> Worker::GetMatchingZonePattern( const char* query, bool ign
 }
 
 
-#ifndef TRACY_NO_STATISTICS
 // TODO: Copy of View::GetZoneParent(TracyView_Utility.cpp) - consider moving code to a common place
 static const ZoneEvent *PlotHelper_GetZoneParent( const Worker &worker, const ZoneEvent &zone, uint64_t tid )
 {
@@ -3825,7 +3825,7 @@ bool Worker::BeginProcessing( HandshakeStatus handshake, const WelcomeMessage &w
         m_captureProgram = welcome.programName;
         m_captureTime = captureTime;
         m_executableTime = welcome.exectime;
-        m_ignoreMemFreeFaults = ( flags & WelcomeFlag::OnDemand ) || ( flags & WelcomeFlag::IsApple );
+        m_ignoreMemFreeFaults = ( flags & WelcomeFlag::OnDemand ) || ( flags & WelcomeFlag::IgnoreMemFaults );
         m_ignoreFrameEndFaults = flags & WelcomeFlag::OnDemand;
         m_data.cpuArch = (CpuArchitecture)welcome.cpuArch;
         m_codeTransfer = flags & WelcomeFlag::CodeTransfer;
